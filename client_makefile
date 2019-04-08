@@ -1,0 +1,29 @@
+IDIR =.
+CC =gcc
+CFLAGS =-I$(IDIR) -g
+ODIR =obj
+LIBS =-Wall -libverbs -lmlx5
+OEXE_CL =write_to_gpu_client
+OEXE_SE =write_to_gpu_server
+
+_DEPS =
+_DEPS += write_to_gpu.h
+
+DEPS = $(patsubst %,$(IDIR)/%,$(_DEPS))
+
+_CL_OBJ = write_to_gpu.o
+_CL_OBJ += write_to_gpu_client.o
+
+CL_OBJ = $(patsubst %,$(ODIR)/%,$(_CL_OBJ))
+
+$(ODIR)/%.o: %.c $(DEPS)
+	$(CC) -c -o $@ $< $(CFLAGS)
+
+write_to_gpu_client: $(CL_OBJ)
+	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
+
+.PHONY: clean
+
+clean:
+	rm -f $(OEXE_CL) $(OEXE_SE) $(ODIR)/*.o *~ core.* $(IDIR)/*~ 
+
