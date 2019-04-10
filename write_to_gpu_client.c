@@ -212,13 +212,13 @@ static int pp_connect_ctx(struct rdma_cb *cb, struct user_params *usr_par,
     struct ibv_qp_attr attr = {
         .qp_state           = IBV_QPS_RTR,
         .path_mtu           = usr_par->mtu,
-        .dest_qp_num        = dest->qpn, //for RC only
-        .rq_psn             = dest->psn, //for RC only
-        .max_dest_rd_atomic = 1,
-        .min_rnr_timer      = 12, // or 16 ?
+//        .dest_qp_num        = dest->qpn, //for RC only
+//        .rq_psn             = dest->psn, //for RC only
+//        .max_dest_rd_atomic = 1, //for RC only
+        .min_rnr_timer      = 16,  // 12 for RC
         .ah_attr            = {
             .is_global      = 0,
-            .dlid           = dest->lid, // for RC only
+//            .dlid           = dest->lid, // for RC only
             .sl             = 0,
             .src_path_bits  = 0,
             .port_num       = usr_par->ib_port
@@ -229,39 +229,22 @@ static int pp_connect_ctx(struct rdma_cb *cb, struct user_params *usr_par,
     if (dest->gid.global.interface_id) {
         attr.ah_attr.is_global = 1;
         attr.ah_attr.grh.hop_limit = 1;
-        attr.ah_attr.grh.dgid = dest->gid; // for RC only
+//        attr.ah_attr.grh.dgid = dest->gid; // for RC only
         attr.ah_attr.grh.sgid_index = usr_par->gidx;
     }
     attr_mask = IBV_QP_STATE              |
                 IBV_QP_AV                 |
                 IBV_QP_PATH_MTU           |
-                IBV_QP_DEST_QPN           | //RC
-                IBV_QP_RQ_PSN             | //RC
-                IBV_QP_MAX_DEST_RD_ATOMIC | // ?
-                IBV_QP_MIN_RNR_TIMER;
+//                IBV_QP_DEST_QPN           | //RC
+//                IBV_QP_RQ_PSN             | //RC
+                IBV_QP_MIN_RNR_TIMER; // for DCT
 
     if (ibv_modify_qp(cb->qp, &attr, attr_mask)) {
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
     }
 
-    // The next we don't need for DC (probably, for RC too)
-//    attr.qp_state       = IBV_QPS_RTS;
-//    attr.timeout        = 14;
-//    attr.retry_cnt      = 7;
-//    attr.rnr_retry      = 7;
-//    attr.sq_psn     = my_psn;
-//    attr.max_rd_atomic  = 1;
-//    attr_mask = IBV_QP_STATE              |
-//                IBV_QP_TIMEOUT            |
-//                IBV_QP_RETRY_CNT          |
-//                IBV_QP_RNR_RETRY          |
-//                IBV_QP_SQ_PSN             |
-//                IBV_QP_MAX_QP_RD_ATOMIC);
-//    if (ibv_modify_qp(cb->qp, &attr, attr_mask)) {
-//        fprintf(stderr, "Failed to modify QP to RTS\n");
-//        return 1;
-//    }
+    /*We don't need pass to RNR for DCT side*/
 
     return 0;
 }
@@ -437,45 +420,25 @@ static struct rdma_cb *pp_init_ctx(struct ibv_device *ib_dev,
     DEBUG_LOG("created srq %p\n", cb->srq);
 
     {
-//        struct ibv_qp_init_attr attr = {
-//            .send_cq = cb->cq,
-//            .recv_cq = cb->cq,
-//            .cap     = {
-//                .max_send_wr  = 1,
-//                .max_recv_wr  = cb->rx_depth,
-//                .max_send_sge = 1,
-//                .max_recv_sge = 1
-//            },
-//            .qp_type = IBV_QPT_RC,
-//        };
         struct ibv_qp_init_attr_ex attr_ex;
         struct mlx5dv_qp_init_attr attr_dv;
 
         memset(&attr_ex, 0, sizeof(attr_ex));
         memset(&attr_dv, 0, sizeof(attr_dv));
 
-        attr_ex.qp_type = IBV_QPT_RC; //IBV_QPT_DRIVER;
+        attr_ex.qp_type = IBV_QPT_DRIVER;
         attr_ex.send_cq = cb->cq;
         attr_ex.recv_cq = cb->cq;
-
-        // For RC start
-        attr_ex.cap.max_send_wr  = 1;
-        attr_ex.cap.max_recv_wr  = 0; /* SRQ is used */ //cb->rx_depth;
-        attr_ex.cap.max_send_sge = 1;
-        attr_ex.cap.max_recv_sge = 1;
-        // For RC end //////
 
         attr_ex.comp_mask |= IBV_QP_INIT_ATTR_PD;
         attr_ex.pd = cb->pd;
         attr_ex.srq = cb->srq; /* Should use SRQ for client only (DCT) */
         
-//        /* create DCT */
-//        attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_DC;
-//        attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCT;
-//        attr_dv.dc_init_attr.dct_access_key = DC_KEY;
+        /* create DCT */
+        attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_DC;
+        attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCT;
+        attr_dv.dc_init_attr.dct_access_key = DC_KEY;
 
-        //DEBUG_LOG ("ibv_create_qp(%p,%p)\n", cb->pd, &attr);
-        //cb->qp = ibv_create_qp(cb->pd, &attr); //TO-DC-1
         DEBUG_LOG ("mlx5dv_create_qp(%p,%p,%p)\n", cb->context, &attr_ex, &attr_dv);
         cb->qp = mlx5dv_create_qp(cb->context, &attr_ex, &attr_dv);
 
@@ -543,40 +506,55 @@ clean_ctx:
 
 int pp_close_ctx(struct rdma_cb *cb)
 {
-    if (ibv_destroy_qp(cb->qp)) {
-        fprintf(stderr, "Couldn't destroy QP\n");
+    int rc;
+    DEBUG_LOG("ibv_destroy_qp(%p)\n", cb->qp);
+    rc = ibv_destroy_qp(cb->qp);
+    if (rc) {
+        fprintf(stderr, "Couldn't destroy QP: error %d\n", rc);
         return 1;
     }
 
-    if (ibv_destroy_cq(cb->cq)) {
-        fprintf(stderr, "Couldn't destroy CQ\n");
+    DEBUG_LOG("ibv_destroy_cq(%p)\n", cb->cq);
+    rc = ibv_destroy_cq(cb->cq);
+    if (rc) {
+        fprintf(stderr, "Couldn't destroy CQ, error %d\n", rc);
         return 1;
     }
 
 	if (cb->srq) {
-        if (ibv_destroy_srq(cb->srq)) {
-            fprintf(stderr, "Couldn't destroy CQ\n");
+        DEBUG_LOG("ibv_destroy_srq(%p)\n", cb->srq);
+        rc = ibv_destroy_srq(cb->srq);
+        if (rc) {
+            fprintf(stderr, "Couldn't destroy SRQ\n");
             return 1;
         }
     }
     
-    if (ibv_dereg_mr(cb->gpu_mr)) {
-        fprintf(stderr, "Couldn't deregister GPU MR\n");
+    DEBUG_LOG("ibv_dereg_mr(%p)\n", cb->gpu_mr);
+    rc = ibv_dereg_mr(cb->gpu_mr);
+    if (rc) {
+        fprintf(stderr, "Couldn't deregister MR, error %d\n", rc);
         return 1;
     }
     
-    if (ibv_dealloc_pd(cb->pd)) {
-        fprintf(stderr, "Couldn't deallocate PD\n");
+    DEBUG_LOG("ibv_dealloc_pd(%p)\n", cb->pd);
+    rc = ibv_dealloc_pd(cb->pd);
+    if (rc) {
+        fprintf(stderr, "Couldn't deallocate PD, error %d\n", rc);
         return 1;
     }
 
-    if (ibv_close_device(cb->context)) {
-        fprintf(stderr, "Couldn't release context\n");
+    DEBUG_LOG("ibv_close_device(%p)\n", cb->context);
+    rc = ibv_close_device(cb->context);
+    if (rc) {
+        fprintf(stderr, "Couldn't release context, error %d\n", rc);
         return 1;
     }
 
-    if (cb->sockfd != -1)
+    if (cb->sockfd != -1) {
+        DEBUG_LOG("close socket(%p)\n", cb->sockfd);
         close(cb->sockfd);
+    }
     
 #ifdef HAVE_CUDA
     if (cb->use_cuda) {
@@ -584,6 +562,7 @@ int pp_close_ctx(struct rdma_cb *cb)
     } else
 #endif //HAVE_CUDA
     {
+        DEBUG_LOG("free memory buffer(%p)\n", cb->gpu_buf);
         free(cb->gpu_buf);
     }
 
@@ -838,7 +817,7 @@ int main(int argc, char *argv[])
     }
 
     my_dest.qpn = cb->qp->qp_num;
-    my_dest.psn = lrand48() & 0xffffff;
+    my_dest.psn = 0; //lrand48() & 0xffffff;
     inet_ntop(AF_INET6, &my_dest.gid, gid, sizeof gid);
     printf("  local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
            my_dest.lid, my_dest.qpn, my_dest.psn, gid);

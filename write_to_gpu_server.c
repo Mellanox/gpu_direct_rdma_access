@@ -58,7 +58,7 @@ static int debug_fast_path = 1;
 #define FDEBUG_LOG_FAST_PATH if (debug_fast_path) fprintf
 
 #define PING_SQ_DEPTH 64
-//#define DC_KEY 0xffeeddcc - server doesn't know DC_KEY, it obtains this from the client by socket
+#define DC_KEY 0xffeeddcc //- server doesn't know DC_KEY, it obtains this from the client by socket
 
 enum {
     SMALL_WRITE_WRID = 1,
@@ -112,10 +112,10 @@ static int pp_connect_ctx(struct rdma_cb *cb, struct user_params *usr_par,
     struct ibv_qp_attr attr = {
         .qp_state           = IBV_QPS_RTR,
         .path_mtu           = usr_par->mtu,
-        .dest_qp_num        = dest->qpn, //for RC only
-        .rq_psn             = dest->psn, //for RC only
-        .max_dest_rd_atomic = 1,
-        .min_rnr_timer      = 12, // or 16 ?
+//        .dest_qp_num        = dest->qpn, //for RC only
+//        .rq_psn             = dest->psn, //for RC only
+//        .max_dest_rd_atomic = 1,  //for RC only
+//        .min_rnr_timer      = 12, //for RC only
         .ah_attr            = {
             .is_global      = 0,
             .dlid           = dest->lid, // for RC only
@@ -134,26 +134,29 @@ static int pp_connect_ctx(struct rdma_cb *cb, struct user_params *usr_par,
     }
     attr_mask = IBV_QP_STATE              |
                 IBV_QP_AV                 |
-                IBV_QP_PATH_MTU           |
-                IBV_QP_DEST_QPN           | //RC
-                IBV_QP_RQ_PSN             | //RC
-                IBV_QP_MAX_DEST_RD_ATOMIC | // ?
-                IBV_QP_MIN_RNR_TIMER;
+                IBV_QP_PATH_MTU           ;
+//                IBV_QP_DEST_QPN           | //RC
+//                IBV_QP_RQ_PSN             | //RC
+//                IBV_QP_MAX_DEST_RD_ATOMIC | //RC
+//                IBV_QP_MIN_RNR_TIMER      ; // RC
 
-//    cb->ah = ibv_create_ah(cb->pd, &attr.ah_attr); //DC only
-//    if (!cb->ah) {
-//        perror("ibv_create_ah");
-//        ret = errno;
-//        return ret;
-//    }
-//    DEBUG_LOG("created ah (%p)\n", cb->ah);
+    cb->ah = ibv_create_ah(cb->pd, &attr.ah_attr); //DC only
+    if (!cb->ah) {
+        perror("ibv_create_ah");
+        return 1;
+    }
+
+    attr.ah_attr.dlid = 0;
+    memset(attr.ah_attr.grh.dgid.raw, 0, sizeof attr.ah_attr.grh.dgid.raw);
+
+    DEBUG_LOG("created ah (%p)\n", cb->ah);
     if (ibv_modify_qp(cb->qp, &attr, attr_mask)) {
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
     }
 
     attr.qp_state       = IBV_QPS_RTS;
-    attr.timeout        = 14; //or 16 ?
+    attr.timeout        = 16; // 14 for RC
     attr.retry_cnt      = 7;
     attr.rnr_retry      = 7;
     attr.sq_psn         = my_psn;
@@ -333,53 +336,33 @@ static struct rdma_cb *pp_init_ctx(struct ibv_device *ib_dev,
     }
 
     {
-//        struct ibv_qp_init_attr attr = {
-//            .send_cq = cb->cq,
-//            .recv_cq = cb->cq,
-//            .cap     = {
-//                .max_send_wr  = 1,
-//                .max_recv_wr  = rx_depth,
-//                .max_send_sge = 1,
-//                .max_recv_sge = 1
-//            },
-//            .qp_type = IBV_QPT_RC,
-//        };
         struct ibv_qp_init_attr_ex attr_ex;
         struct mlx5dv_qp_init_attr attr_dv;
 
         memset(&attr_ex, 0, sizeof(attr_ex));
         memset(&attr_dv, 0, sizeof(attr_dv));
 
-        attr_ex.qp_type = IBV_QPT_RC; //IBV_QPT_DRIVER;
+        attr_ex.qp_type = IBV_QPT_DRIVER;
         attr_ex.send_cq = cb->cq;
         attr_ex.recv_cq = cb->cq;
 
-        // For RC start
-        attr_ex.cap.max_send_wr  = 10;
-        attr_ex.cap.max_recv_wr  = usr_par->rx_depth;
-        attr_ex.cap.max_send_sge = 1;
-        attr_ex.cap.max_recv_sge = 1;
-        // For RC end //////
-
         attr_ex.comp_mask |= IBV_QP_INIT_ATTR_PD;
         attr_ex.pd = cb->pd;
-        attr_ex.srq = NULL; /* Should use SRQ for server only (for DCT) cb->srq; */
+        attr_ex.srq = NULL; /* NULL for server (DCI) */
         
-//        /* create DCI */
-//        attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_DC;
-//        attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCI;
-//
-     //   attr_ex.cap.max_send_wr = PING_SQ_DEPTH;
-     //   attr_ex.cap.max_send_sge = 1;
+       /* create DCI */
+       attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_DC;
+       attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCI;
+
+        attr_ex.cap.max_send_wr = PING_SQ_DEPTH;
+        attr_ex.cap.max_send_sge = 1;
 
         attr_ex.comp_mask |= IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
         attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE/* | IBV_QP_EX_WITH_RDMA_READ*/;
 
         attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_QP_CREATE_FLAGS;
-//        attr_dv.create_flags |= MLX5DV_QP_CREATE_DISABLE_SCATTER_TO_CQE; /*driver doesnt support scatter2cqe data-path on DCI yet*/
+        attr_dv.create_flags |= MLX5DV_QP_CREATE_DISABLE_SCATTER_TO_CQE; /*driver doesnt support scatter2cqe data-path on DCI yet*/
 
-        //DEBUG_LOG ("ibv_create_qp(%p,%p)\n", cb->pd, &attr);
-        //cb->qp = ibv_create_qp(cb->pd, &attr); //todo mlx5dv_create_qp(cb->cm_id->verbs, &attr_ex, &attr_dv);
         DEBUG_LOG ("mlx5dv_create_qp(%p,%p,%p)\n", cb->context, &attr_ex, &attr_dv);
         cb->qp = mlx5dv_create_qp(cb->context, &attr_ex, &attr_dv);
         if (!cb->qp)  {
@@ -404,7 +387,7 @@ static struct rdma_cb *pp_init_ctx(struct ibv_device *ib_dev,
             .qp_state        = IBV_QPS_INIT,
             .pkey_index      = 0,
             .port_num        = usr_par->ib_port,
-            //.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ
+//            .qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ
             .qp_access_flags = IBV_ACCESS_LOCAL_WRITE
         };
 
@@ -412,7 +395,7 @@ static struct rdma_cb *pp_init_ctx(struct ibv_device *ib_dev,
                           IBV_QP_STATE      |
                           IBV_QP_PKEY_INDEX |
                           IBV_QP_PORT       |
-                          IBV_QP_ACCESS_FLAGS)) {
+                          0 /*IBV_QP_ACCESS_FLAGS*/)) {
             fprintf(stderr, "Failed to modify QP to INIT\n");
             goto clean_qp;
         }
@@ -450,42 +433,59 @@ clean_ctx:
 
 int pp_close_ctx(struct rdma_cb *cb)
 {
-    if (ibv_destroy_qp(cb->qp)) {
-        fprintf(stderr, "Couldn't destroy QP\n");
+    int rc;
+    DEBUG_LOG("ibv_destroy_qp(%p)\n", cb->qp);
+    rc = ibv_destroy_qp(cb->qp);
+    if (rc) {
+        fprintf(stderr, "Couldn't destroy QP: error %d\n", rc);
         return 1;
     }
 
-    if (ibv_destroy_cq(cb->cq)) {
-        fprintf(stderr, "Couldn't destroy CQ\n");
+    DEBUG_LOG("ibv_destroy_cq(%p)\n", cb->cq);
+    rc = ibv_destroy_cq(cb->cq);
+    if (rc) {
+        fprintf(stderr, "Couldn't destroy CQ, error %d\n", rc);
         return 1;
     }
 
-    if (ibv_dereg_mr(cb->mr)) {
-        fprintf(stderr, "Couldn't deregister MR\n");
+    DEBUG_LOG("ibv_dereg_mr(%p)\n", cb->mr);
+    rc = ibv_dereg_mr(cb->mr);
+    if (rc) {
+        fprintf(stderr, "Couldn't deregister MR, error %d\n", rc);
         return 1;
     }
 
-    if (ibv_dealloc_pd(cb->pd)) {
-        fprintf(stderr, "Couldn't deallocate PD\n");
+    DEBUG_LOG("ibv_dealloc_pd(%p)\n", cb->pd);
+    rc = ibv_dealloc_pd(cb->pd);
+    if (rc) {
+        fprintf(stderr, "Couldn't deallocate PD, error %d\n", rc);
         return 1;
     }
 
     if (cb->channel) {
-        if (ibv_destroy_comp_channel(cb->channel)) {
-            fprintf(stderr, "Couldn't destroy completion channel\n");
+        DEBUG_LOG("ibv_destroy_comp_channel(%p)\n", cb->channel);
+        rc = ibv_destroy_comp_channel(cb->channel);
+        if (rc) {
+            fprintf(stderr, "Couldn't destroy completion channel, error %d\n", rc);
             return 1;
         }
     }
 
-    if (ibv_close_device(cb->context)) {
-        fprintf(stderr, "Couldn't release context\n");
+    DEBUG_LOG("ibv_close_device(%p)\n", cb->context);
+    rc = ibv_close_device(cb->context);
+    if (rc) {
+        fprintf(stderr, "Couldn't release context, error %d\n", rc);
         return 1;
     }
 
+    DEBUG_LOG("free memory buffer(%p)\n", cb->buf);
     free(cb->buf);
 
-    if (cb->sockfd != -1)
-        close(cb->sockfd);
+    // We close socket on the client side
+//    if (cb->sockfd != -1) {
+//        DEBUG_LOG("close socket(%p)\n", cb->sockfd)
+//        close(cb->sockfd);
+//    }
     
     free(cb);
 
@@ -519,25 +519,7 @@ static int pp_post_recv(struct rdma_cb *cb, int n)
 
 static int pp_post_send(struct rdma_cb *cb)
 {
-//    struct ibv_sge list = {                      
-//        .addr   = (uintptr_t) cb->buf,           
-//        .length = cb->size,                      
-//        .lkey   = cb->mr->lkey                   
-//    };                                           
-//    struct ibv_send_wr wr = {                    
-//        .wr_id      = BUFF_WRITE_WRID,        
-//        .sg_list    = &list,                     
-//        .num_sge    = 1,                         
-//        .opcode     = IBV_WR_RDMA_WRITE,         
-//        .send_flags = IBV_SEND_SIGNALED,         
-//        .wr.rdma.remote_addr = cb->gpu_buf_addr, 
-//        .wr.rdma.rkey        = cb->gpu_buf_rkey, 
-//        .next       = NULL                       
-//    };                                           
-//    struct ibv_send_wr *bad_wr;                  
-
-
-//    /* 1st small RDMA Write for DCI connect, this will create cqe->ts_start */
+    /* 1st small RDMA Write for DCI connect, this will create cqe->ts_start */
     DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_start: qpex = %p\n", cb->qpex);
     ibv_wr_start(cb->qpex);
     cb->qpex->wr_id = SMALL_WRITE_WRID;
@@ -545,7 +527,7 @@ static int pp_post_send(struct rdma_cb *cb)
     DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
                         cb->qpex, cb->gpu_buf_rkey, (unsigned long long)cb->gpu_buf_addr);
     ibv_wr_rdma_write(cb->qpex, cb->gpu_buf_rkey, cb->gpu_buf_addr);
-//    mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->rem_dctn, DC_KEY);
+    mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->rem_dctn, DC_KEY);
     DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
                         cb->qpex, cb->mr->lkey, (unsigned long long)cb->buf, 1);
     ibv_wr_set_sge(cb->qpex, cb->mr->lkey, (uintptr_t)cb->buf, 1);
@@ -555,19 +537,14 @@ static int pp_post_send(struct rdma_cb *cb)
     DEBUG_LOG_FAST_PATH("2nd SIZE x RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
                         cb->qpex, cb->gpu_buf_rkey, (unsigned long long)cb->gpu_buf_addr);
     ibv_wr_rdma_write(cb->qpex, cb->gpu_buf_rkey, cb->gpu_buf_addr);
-//    mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->rem_dctn, DC_KEY);
+    mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->rem_dctn, DC_KEY);
     DEBUG_LOG_FAST_PATH("2nd SIZE x RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
                         cb->qpex, cb->mr->lkey, (unsigned long long)cb->buf, cb->size);
     ibv_wr_set_sge(cb->qpex, cb->mr->lkey, (uintptr_t)cb->buf, (uint32_t)cb->size);
-//
+
     /* ring DB */
     DEBUG_LOG_FAST_PATH("ibv_wr_complete: qpex = %p\n", cb->qpex);
     return ibv_wr_complete(cb->qpex);
-
-//    DEBUG_LOG_FAST_PATH("ibv_post_send IBV_WR_RDMA_WRITE: local buf 0x%llx, lkey 0x%x, remote buf 0x%llx, rkey = 0x%x, size = %u\n",
-//                        (unsigned long long)wr.sg_list[0].addr, wr.sg_list[0].lkey,                                                 
-//                        (unsigned long long)wr.wr.rdma.remote_addr, wr.wr.rdma.rkey, wr.sg_list[0].length);                         
-//    return ibv_post_send(cb->qp, &wr, &bad_wr);                                                                                     
 }
 
 static void usage(const char *argv0)
@@ -724,7 +701,6 @@ int main(int argc, char *argv[])
     struct pingpong_dest    my_dest;
     struct pingpong_dest   *rem_dest;
     struct timeval          start, end;
-    char                   *ib_devname = NULL;
     //int                     routs;
     int                     scnt, pre_scnt;
     int                     num_cq_events = 0;
@@ -750,7 +726,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (!ib_devname) /*if ib device name is not given by comand line*/{
+    if (!usr_par.ib_devname) /*if ib device name is not given by comand line*/{
         DEBUG_LOG ("Device name is not given by command line, taking the first available from device list\n");
         ib_dev = *dev_list;
         if (!ib_dev) {
@@ -768,7 +744,7 @@ int main(int argc, char *argv[])
         }
         ib_dev = dev_list[i];
         if (!ib_dev) {
-            fprintf(stderr, "IB device %s not found\n", ib_devname);
+            fprintf(stderr, "IB device %s not found\n", usr_par.ib_devname);
             free(usr_par.ib_devname);
             return 1;
         }
@@ -818,7 +794,7 @@ int main(int argc, char *argv[])
         memset(&my_dest.gid, 0, sizeof my_dest.gid);
 
     my_dest.qpn = cb->qp->qp_num;
-    my_dest.psn = lrand48() & 0xffffff;
+    my_dest.psn = 0; //lrand48() & 0xffffff;
     inet_ntop(AF_INET6, &my_dest.gid, gid, sizeof gid);
     printf("  local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
            my_dest.lid, my_dest.qpn, my_dest.psn, gid);
