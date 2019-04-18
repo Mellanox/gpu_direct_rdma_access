@@ -63,57 +63,42 @@ static int debug_fast_path = 1;
 #define FDEBUG_LOG if (debug) fprintf
 #define FDEBUG_LOG_FAST_PATH if (debug_fast_path) fprintf
 
-#define CQ_DEPTH	8
+#define CQ_DEPTH    8
 #define DC_KEY 0xffeeddcc
 
 /* RDMA control buffer */
 struct rdma_device {
 
-    struct ibv_context     *context;
-    struct ibv_pd          *pd;
-    struct ibv_mr          *gpu_mr;
-    struct ibv_cq          *cq;
-    struct ibv_srq         *srq; /* for DCT only */
-    struct ibv_qp          *qp;
-    void                   *gpu_buf;
-    unsigned long           gpu_buf_size;
+    struct ibv_context *context;
+    struct ibv_pd      *pd;
+    struct ibv_cq      *cq;
+    struct ibv_srq     *srq; /* for DCT only, for DCI this is NULL */
+    struct ibv_qp      *qp;
+    int                 ib_port;
     struct ibv_port_attr    portinfo;
-    int                     sockfd;
+    
+    /* QP related fields */
+    uint64_t            dc_key;
+    uint32_t            dctn; /*QP num*/
 
-    int                     use_cuda;
-
+    /* Address handler (port info) relateed fields */
+    int                 gidx;
+    union ibv_gid       gid;
+    uint16_t            lid;
 };
 
-struct user_params {
-
-    int                  port;
-    int                  ib_port;
-    unsigned long        size;
-    char                *ib_devname;
-    enum ibv_mtu         mtu;
-    int                  iters;
-    int                  gidx;
-    int                  use_cuda;
-    char                *servername;
-};
-
-//struct pingpong_dest {
-//    int             lid;
-//    int             qpn;
-//    int             psn;
-//    union ibv_gid   gid;
-//};
 struct rdma_buffer {
     /* Buffer Related fields */
-    uint64_t	    addr;
-    uint32_t        size;
+    void           *buf_addr;
+    size_t          buf_size;
+    int             use_cuda;
+
+    /* MR Related fields */
+    struct ibv_mr  *gpu_mr;
     uint32_t        rkey;
-    /* QP related fields */
-    uint64_t        dc_key;
-    uint32_t        dctn; /*QP num*/
-    /* IB device (address handler) relateed fields */
-    union ibv_gid   gid;
-    uint16_t        lid;
+    
+    //uint64_t        addr;
+    //uint32_t        size;
 };
 
 //============================================================================================
@@ -204,7 +189,6 @@ static int init_gpu(struct rdma_device *cb, size_t _size)
 
 static int free_gpu(struct rdma_device *cb)
 {
-    int ret = 0;
     CUdeviceptr d_A = (CUdeviceptr) cb->gpu_buf;
 
     printf("deallocating RX GPU buffer\n");
@@ -214,42 +198,240 @@ static int free_gpu(struct rdma_device *cb)
     printf("destroying current CUDA Context\n");
     CUCHECK(cuCtxDestroy(cuContext));
 
-    return ret;
+    return 0;
 }
 #endif //HAVE_CUDA
 //============================================================================================
-// ???
-static int pp_connect_ctx(struct rdma_device *cb, struct user_params *usr_par,
-                          int my_psn, struct pingpong_dest *dest)
+struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port) /* client */
 {
-    struct ibv_qp_attr attr = {
-        .qp_state           = IBV_QPS_RTR,
-        .path_mtu           = usr_par->mtu,
-//        .dest_qp_num        = dest->qpn, //for RC only
-//        .rq_psn             = dest->psn, //for RC only
-//        .max_dest_rd_atomic = 1, //for RC only
-        .min_rnr_timer      = 16,  // 12 for RC
-        .ah_attr            = {
-            .is_global      = 0,
-//            .dlid           = dest->lid, // for RC only
-            .sl             = 0,
-            .src_path_bits  = 0,
-            .port_num       = usr_par->ib_port
-        }
-    };
-    enum ibv_qp_attr_mask attr_mask;
+    struct rdma_device     *rdma_dev;
+    struct ibv_device     **dev_list;
+    struct ibv_device      *ib_dev;
+    int     ret_val;
+    int     i;
 
-    if (dest->gid.global.interface_id) {
-        attr.ah_attr.is_global = 1;
-        attr.ah_attr.grh.hop_limit = 1;
-//        attr.ah_attr.grh.dgid = dest->gid; // for RC only
-        attr.ah_attr.grh.sgid_index = usr_par->gidx;
+    rdma_dev = calloc(1, sizeof *rdma_dev);
+    if (!rdma_dev) {
+        fprintf(stderr, "rdma_device memory allocation failed\n");
+        return NULL;
     }
-    attr_mask = IBV_QP_STATE              |
-                IBV_QP_AV                 |
-                IBV_QP_PATH_MTU           |
-//                IBV_QP_DEST_QPN           | //RC
-//                IBV_QP_RQ_PSN             | //RC
+
+    /****************************************************************************************************
+     * In the next block we are checking if given IB device name matches one of devices in the list.
+     * The result of this block is ig_dev - initialized pointer to the relevant struct ibv_device
+     ****************************************************************************************************/
+    dev_list = ibv_get_device_list(NULL);
+    if (!dev_list) {
+        perror("Failed to get IB devices list");
+        goto cleea_device_list;
+    }
+
+    DEBUG_LOG ("Given device name \"%s\"\n", ib_dev_name);
+    for (i = 0; dev_list[i]; ++i) {
+        char *dev_name_from_list = (char*)ibv_get_device_name(dev_list[i]);
+        DEBUG_LOG ("Device %d name \"%s\"\n", i, dev_name_from_list);
+        if (!strcmp(dev_name_from_list, ib_dev_name)) /*if found*/
+            break;
+    }
+    ib_dev = dev_list[i];
+    if (!ib_dev) {
+        fprintf(stderr, "IB device %s not found\n", ib_dev_name);
+        goto cleea_device_list;
+    }
+    /****************************************************************************************************/
+
+    DEBUG_LOG ("ibv_open_device(ib_dev = %p)\n", ib_dev);
+    rdma_dev->context = ibv_open_device(ib_dev);
+    if (!rdma_dev->context) {
+        fprintf(stderr, "Couldn't get context for %s\n", ib_dev_name);
+        goto cleea_device_list;
+    }
+    DEBUG_LOG("created ib context %p\n", rdma_dev->context);
+    /* We are now done with device list, free it */
+    ibv_free_device_list(dev_list);
+    dev_list = NULL;
+    ib_dev = NULL;    
+    
+    DEBUG_LOG ("ibv_alloc_pd(ibv_context = %p)\n", rdma_dev->context);
+    rdma_dev->pd = ibv_alloc_pd(rdma_dev->context);
+    if (!rdma_dev->pd) {
+        fprintf(stderr, "Couldn't allocate PD\n");
+        goto clean_device;
+    }
+    DEBUG_LOG("created pd %p\n", rdma_dev->pd);
+
+    DEBUG_LOG ("ibv_create_cq(%p, %d, NULL, NULL, 0)\n", rdma_dev->context, CQ_DEPTH);
+    rdma_dev->cq = ibv_create_cq(rdma_dev->context, CQ_DEPTH, NULL, NULL, 0);
+    if (!rdma_dev->cq) {
+        fprintf(stderr, "Couldn't create CQ\n");
+        goto clean_pd;
+    }
+    DEBUG_LOG("created cq %p\n", rdma_dev->cq);
+
+    /* - - - - - - -  Create SRQ  - - - - - - - */
+    struct ibv_srq_init_attr srq_attr;
+    memset(&srq_attr, 0, sizeof(srq_attr));
+    srq_attr.attr.max_wr = 2;
+    srq_attr.attr.max_sge = 1;
+    DEBUG_LOG ("ibv_create_srq(%p, %d, NULL, NULL, 0)\n", rdma_dev->context, CQ_DEPTH);
+    rdma_dev->srq = ibv_create_srq(rdma_dev->pd, &srq_attr);
+    if (!rdma_dev->srq) {
+        fprintf(stderr, "ibv_create_srq failed\n");
+        goto clean_cq;
+    }
+    DEBUG_LOG("created srq %p\n", rdma_dev->srq);
+
+    /* - - - - - - -  Create QP  - - - - - - - */
+    struct ibv_qp_init_attr_ex attr_ex;
+    struct mlx5dv_qp_init_attr attr_dv;
+
+    memset(&attr_ex, 0, sizeof(attr_ex));
+    memset(&attr_dv, 0, sizeof(attr_dv));
+
+    attr_ex.qp_type = IBV_QPT_DRIVER;
+    attr_ex.send_cq = rdma_dev->cq;
+    attr_ex.recv_cq = rdma_dev->cq;
+
+    attr_ex.comp_mask |= IBV_QP_INIT_ATTR_PD;
+    attr_ex.pd = rdma_dev->pd;
+    attr_ex.srq = rdma_dev->srq; /* Should use SRQ for client only (DCT) */
+
+    /* create DCT */
+    attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_DC;
+    attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCT;
+    attr_dv.dc_init_attr.dct_access_key = DC_KEY;
+
+    DEBUG_LOG ("mlx5dv_create_qp(%p,%p,%p)\n", rdma_dev->context, &attr_ex, &attr_dv);
+    rdma_dev->qp = mlx5dv_create_qp(rdma_dev->context, &attr_ex, &attr_dv);
+
+    if (!rdma_dev->qp)  {
+        fprintf(stderr, "Couldn't create QP\n");
+        goto clean_srq;
+    }
+
+    /* - - - - - - -  Modify QP to INIT  - - - - - - - */
+    struct ibv_qp_attr attr = {
+        .qp_state        = IBV_QPS_INIT,
+        .pkey_index      = 0,
+        .port_num        = ib_port,
+        .qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE
+    };
+    enum ibv_qp_attr_mask attr_mask = IBV_QP_STATE      |
+                                      IBV_QP_PKEY_INDEX |
+                                      IBV_QP_PORT       |
+                                      IBV_QP_ACCESS_FLAGS;
+    ret_val = ibv_modify_qp(rdma_dev->qp, &attr, attr_mask);
+    if (ret_val) {
+        fprintf(stderr, "Failed to modify QP to INIT, error %d\n", ret_val);
+        goto clean_qp;
+    }
+
+    rdma_dev->ib_port = ib_port;
+    rdma_dev->dc_key  = DC_KEY;
+    rdma_dev->dctn    = rdma_dev->qp->qp_num;
+    rdma_dev->gidx    = -1; /*default value (no GID)*/
+
+    return rdma_dev;
+
+clean_qp:
+    if (rdma_dev->qp) {
+        ibv_destroy_qp(rdma_dev->qp);
+    }
+
+clean_srq:
+    if (rdma_dev->srq) {
+        ibv_destroy_srq(rdma_dev->srq);
+    }
+
+clean_cq:
+    if (rdma_dev->cq) {
+        ibv_destroy_cq(rdma_dev->cq);
+    }
+
+clean_pd:
+    if (rdma_dev->pd) {
+        ibv_dealloc_pd(rdma_dev->pd);
+    }
+
+clean_device:
+    if (rdma_dev->context) {
+        ibv_close_device(rdma_dev->context);
+    }
+
+clean_device_list:
+    if (dev_list) {
+        ibv_free_device_list(dev_list);
+    }
+
+    return NULL;
+}
+
+/****************************************************************************************
+ * Fill portinfo tructure, get lid and gid from portinfo
+ * Return value: 0 - success, 1 - error
+ ****************************************************************************************/
+int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev, int gidx)
+{
+    int ret_val;
+
+	ret_val = ibv_query_port(rdma_dev->context, rdma_dev->ib_port, &(rdma_dev->portinfo));
+    if (ret_val) {
+        fprintf(stderr, "Couldn't get port info\n");
+        return 1;
+    }
+
+    rdma_dev->lid = rdma_dev->portinfo.lid;
+    if ((rdma_dev->portinfo.link_layer != IBV_LINK_LAYER_ETHERNET) && (!my_dest.lid)) {
+        fprintf(stderr, "Couldn't get local LID\n");
+        return 1;
+    }
+    
+    if (gidx < 0) {
+        if (rdma_dev->portinfo.link_layer == IBV_LINK_LAYER_ETHERNET) {
+            fprintf(stderr, "Wrong GID index (%d) for ETHERNET port\n", gidx);
+            return 1;
+        } else {
+            memset(&(rdma_dev->gid), 0, sizeof rdma_dev->gid);
+        }
+    } else /* gidx >= 0*/ {
+        ret_val = ibv_query_gid(cb->context, rdma_dev->ib_port, gidx, &(rdma_dev->gid))
+        if (ret_val) {
+            fprintf(stderr, "can't read GID of index %d, error code %d\n", gidx, ret_val);
+            return 1;
+        }
+        DEBUG_LOG ("My GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
+                   rdma_dev->gid.raw[0], rdma_dev->gid.raw[1], rdma_dev->gid.raw[2], rdma_dev->gid.raw[3],
+                   rdma_dev->gid.raw[4], rdma_dev->gid.raw[5], rdma_dev->gid.raw[6], rdma_dev->gid.raw[7], 
+                   rdma_dev->gid.raw[8], rdma_dev->gid.raw[9], rdma_dev->gid.raw[10], rdma_dev->gid.raw[11],
+                   rdma_dev->gid.raw[12], rdma_dev->gid.raw[13], rdma_dev->gid.raw[14], rdma_dev->gid.raw[15] );
+    }
+    rdma_dev->gidx = gidx;
+    return 0;
+}
+
+/****************************************************************************************
+ * Modify target QP state to RTR (on the client side)
+ * Return value: 0 - success, 1 - error
+ ****************************************************************************************/
+int modify_target_qp_to_rtr(struct rdma_device *rdma_dev, enum ibv_mtu mtu)
+{
+    struct ibv_qp_attr      qp_attr;
+    enum ibv_qp_attr_mask   attr_mask;
+
+    memset(&qp_attr, 0, sizeof qp_attr);
+    qp_attr.qp_state       = IBV_QPS_RTR,
+    qp_attr.path_mtu       = mtu,
+    qp_attr.min_rnr_timer  = 16,
+    qp_attr.ah_attr.port_num    = rdma_dev->ib_port;
+
+    if (rdma_dev->gid.global.interface_id) {
+        qp_attr.ah_attr.is_global = 1;
+        qp_attr.ah_attr.grh.hop_limit  = 1;
+        qp_attr.ah_attr.grh.sgid_index = rdma_dev->gidx;
+    }
+    attr_mask = IBV_QP_STATE          |
+                IBV_QP_AV             |
+                IBV_QP_PATH_MTU       |
                 IBV_QP_MIN_RNR_TIMER; // for DCT
 
     if (ibv_modify_qp(cb->qp, &attr, attr_mask)) {
@@ -257,11 +439,26 @@ static int pp_connect_ctx(struct rdma_device *cb, struct user_params *usr_par,
         return 1;
     }
 
-    /*We don't need pass to RNR for DCT side*/
-
     return 0;
 }
 
+//============================================================================================
+struct rdma_buffer *rdma_buffer_reg(struct rdma_device device, void *addr, size_t length)
+{
+    struct rdma_buffer *rdma_buff;
+
+    //TODO
+
+    return rdma_buff;
+}
+
+//============================================================================================
+void rdma_buffer_dereg(struct rdma_buffer *buffer)
+{
+    //TODO
+}
+
+#if 0
 static struct pingpong_dest *pp_client_exch_dest(struct rdma_device *cb,
                                                  const char *servername,
                                                  int port,
@@ -533,7 +730,7 @@ int pp_close_ctx(struct rdma_device *cb)
         return 1;
     }
 
-	if (cb->srq) {
+    if (cb->srq) {
         DEBUG_LOG("ibv_destroy_srq(%p)\n", cb->srq);
         rc = ibv_destroy_srq(cb->srq);
         if (rc) {
@@ -583,252 +780,4 @@ int pp_close_ctx(struct rdma_device *cb)
     return 0;
 }
 
-static void usage(const char *argv0)
-{
-    printf("Usage:\n");
-    printf("  %s <host>     connect to server at <host>\n", argv0);
-    printf("\n");
-    printf("Options:\n");
-    printf("  -p, --port=<port>         listen on/connect to port <port> (default 18515)\n");
-    printf("  -d, --ib-dev=<dev>        use IB device <dev> (default first device found)\n");
-    printf("  -i, --ib-port=<port>      use port <port> of IB device (default 1)\n");
-    printf("  -s, --size=<size>         size of message to exchange (default 4096)\n");
-    printf("  -m, --mtu=<size>          path MTU (default 1024)\n");
-    printf("  -n, --iters=<iters>       number of exchanges (default 1000)\n");
-    printf("  -g, --gid-idx=<gid index> local port gid index\n");
-    printf("  -u, --use-cuda            use CUDA pacage (work with GPU memoty)\n");
-}
-
-static int parse_command_line(int argc, char *argv[], struct user_params *usr_par)
-{
-    memset(usr_par, 0, sizeof *usr_par);
-    /*Set defaults*/
-    usr_par->port       = 18515;
-    usr_par->ib_port    = 1;
-    usr_par->size       = 4096;
-    usr_par->mtu        = IBV_MTU_1024;
-    usr_par->iters      = 1000;
-    usr_par->gidx       = -1;
-
-    while (1) {
-        int c;
-
-        static struct option long_options[] = {
-            { .name = "port",          .has_arg = 1, .val = 'p' },
-            { .name = "ib-dev",        .has_arg = 1, .val = 'd' },
-            { .name = "ib-port",       .has_arg = 1, .val = 'i' },
-            { .name = "size",          .has_arg = 1, .val = 's' },
-            { .name = "mtu",           .has_arg = 1, .val = 'm' },
-            { .name = "iters",         .has_arg = 1, .val = 'n' },
-            { .name = "gid-idx",       .has_arg = 1, .val = 'g' },
-            { .name = "use-cuda",      .has_arg = 0, .val = 'u' },
-            { 0 }
-        };
-
-        c = getopt_long(argc, argv, "p:d:i:s:m:n:g:u",
-                        long_options, NULL);
-        if (c == -1)
-            break;
-
-        switch (c) {
-        
-        case 'p':
-            usr_par->port = strtol(optarg, NULL, 0);
-            if (usr_par->port < 0 || usr_par->port > 65535) {
-                usage(argv[0]);
-                return 1;
-            }
-            break;
-
-        case 'd':
-            //usr_par->ib_devname = strdupa(optarg);
-            usr_par->ib_devname = calloc(1, strlen(optarg)+1);
-            if (!usr_par->ib_devname){
-                perror("ib_devname mem alloc failure");
-                return 1;
-            }
-            strcpy(usr_par->ib_devname, optarg);
-            break;
-
-        case 'i':
-            usr_par->ib_port = strtol(optarg, NULL, 0);
-            if (usr_par->ib_port < 0) {
-                usage(argv[0]);
-                return 1;
-            }
-            break;
-
-        case 's':
-            usr_par->size = strtol(optarg, NULL, 0);
-            break;
-
-        case 'm':
-            usr_par->mtu = pp_mtu_to_enum(strtol(optarg, NULL, 0));
-            if (usr_par->mtu < 0) {
-                usage(argv[0]);
-                return 1;
-            }
-            break;
-
-        case 'n':
-            usr_par->iters = strtol(optarg, NULL, 0);
-            break;
-
-        case 'g':
-            usr_par->gidx = strtol(optarg, NULL, 0);
-            break;
-
-        case 'u':
-            usr_par->use_cuda = 1;
-            break;
-        
-        default:
-            usage(argv[0]);
-            return 1;
-        }
-    }
-
-    if (optind == argc) {
-        fprintf(stderr, "Server name is missing in the commant line.\n");
-        usage(argv[0]);
-        return 1;
-    } else if (optind == argc - 1) {
-        //usr_par->servername = strdupa(argv[optind]);
-        usr_par->servername = calloc(1, strlen(argv[optind])+1);
-        if (!usr_par->servername){
-            perror("servername mem alloc failure");
-            return 1;
-        }
-        strcpy(usr_par->servername, argv[optind]);
-    }
-    else if (optind < argc) {
-        usage(argv[0]);
-        return 1;
-    }
-
-    if (!usr_par->ib_devname){
-        fprintf(stderr, "IB device name is missing in the command line.");
-        usage(argv[0]);
-        return 1;
-    }
-
-    return 0;
-}
-
-int main(int argc, char *argv[])
-{
-    struct ibv_device     **dev_list;
-    struct ibv_device      *ib_dev;
-    struct rdma_device     *cb;
-    struct pingpong_dest    my_dest;
-    struct pingpong_dest   *rem_dest;
-    struct timeval          start, end;
-    int                     routs;
-    int                     cnt;
-    char                    gid[INET6_ADDRSTRLEN];
-    struct user_params      usr_par;
-    int                     ret;
-
-    srand48(getpid() * time(NULL));
-
-    ret_val = parse_command_line(argc, argv, &usr_par);
-   if (ret_val) {
-       return ret_val;
-   }
-
-   rdma_dev = rdma_open_device_target(const char *ib_dev_name, int ib_port) /* client */
-   if (!rdma_dev) {
-       return 1;
-   }
-
-   ret_val = rdma_set_lid_gid_from_port_info(rdma_dev, usr_par->gidx)
-   if (ret_val) {
-       return ret_val;
-   }
-
-    my_dest.qpn = cb->qp->qp_num;
-    my_dest.psn = 0; //lrand48() & 0xffffff;
-    inet_ntop(AF_INET6, &my_dest.gid, gid, sizeof gid);
-    printf("  local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-           my_dest.lid, my_dest.qpn, my_dest.psn, gid);
-
-
-    DEBUG_LOG ("Remote server name \"%s\"\n", usr_par.servername);
-    rem_dest = pp_client_exch_dest(cb, usr_par.servername, usr_par.port, &my_dest);
-    free(usr_par.servername);
-
-    if (!rem_dest)
-        return 1;
-
-    inet_ntop(AF_INET6, &rem_dest->gid, gid, sizeof gid);
-    printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-           rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
-
-    if (pp_connect_ctx(cb, &usr_par, my_dest.psn, rem_dest))
-        return 1;
-
-
-    if (gettimeofday(&start, NULL)) {
-        perror("gettimeofday");
-        return 1;
-    }
-
-    /****************************************************************************************************
-     * The main loop where client and server send and receive "iters" number of messages
-     */
-    for (cnt = 0; cnt < usr_par.iters; cnt++) {
-
-        char sendmsg[sizeof "0102030405060708:01020304:01020304:01020304"];
-        char ackmsg[sizeof "rdma_write completed"];
-
-        // Sending RDMA data (address and rkey) by socket as a triger to start RDMA write operation
-        sprintf(sendmsg, "%016llx:%08lx:%08x:%08x", (unsigned long long)cb->gpu_buf, cb->gpu_buf_size, cb->gpu_mr->rkey, cb->qp->qp_num);
-        DEBUG_LOG_FAST_PATH("Send message N %d: \"%s\" to the server\n", cnt, sendmsg);
-        if (write(cb->sockfd, sendmsg, sizeof sendmsg) != sizeof sendmsg) {
-            fprintf(stderr, "Couldn't send RDMA data for iteration\n");
-            return 1;
-        }
-        
-        // Wating for confirmation message from the socket that rdma_write from the server has beed completed
-        if (recv(cb->sockfd, ackmsg, sizeof(ackmsg), MSG_WAITALL) != sizeof(ackmsg)) {
-            perror("client read");
-            fprintf(stderr, "Couldn't read \"rdma_write completed\" message\n");
-            return 1;
-        }
-
-        // Printing received data for debug purpose
-        DEBUG_LOG_FAST_PATH("Received ack N %d: \"%s\"\n", cnt, ackmsg);
-#ifdef HAVE_CUDA
-        if (!cb->use_cuda) {
-            DEBUG_LOG_FAST_PATH("Written data \"%s\"\n", (char*)cb->gpu_buf);
-        }
-#else
-    DEBUG_LOG_FAST_PATH("Written data \"%s\"\n", (char*)cb->gpu_buf);
-#endif //HAVE_CUDA
-    }
-    /****************************************************************************************************/
-
-    if (gettimeofday(&end, NULL)) {
-        perror("gettimeofday");
-        return 1;
-    }
-
-    {
-        float usec = (end.tv_sec - start.tv_sec) * 1000000 +
-            (end.tv_usec - start.tv_usec);
-        long long bytes = (long long) usr_par.size * usr_par.iters * 2;
-
-        printf("%lld bytes in %.2f seconds = %.2f Mbit/sec\n",
-               bytes, usec / 1000000., bytes * 8. / usec);
-        printf("%d iters in %.2f seconds = %.2f usec/iter\n",
-               usr_par.iters, usec / 1000000., usec / usr_par.iters);
-    }
-
-    if (pp_close_ctx(cb))
-        return 1;
-
-    ibv_free_device_list(dev_list);
-    free(rem_dest);
-
-    return 0;
-}
+#endif

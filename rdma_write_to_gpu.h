@@ -63,8 +63,8 @@ struct rdma_buffer;
  *
  * returns: a pointer to a rdma_device object or NULL on error
  */
-struct rdma_device *rdma_open_device_target(struct sockaddr *addr);
-struct rdma_device *rdma_open_device_source(struct sockaddr *addr);
+struct rdma_device *rdma_open_device_target(const char *ib_dev_name /*struct sockaddr *addr*/); /* client */
+struct rdma_device *rdma_open_device_source(const char *ib_dev_name /*struct sockaddr *addr*/); /* server */
 
 /* 
  * Close and release all rdma_device resources
