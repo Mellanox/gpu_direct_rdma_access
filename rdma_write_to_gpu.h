@@ -41,7 +41,7 @@ extern "C" {
 #endif
 
 /*
- * rdma_device object holds the RDMA resources of the local RDMA device, 
+ * rdma_device object holds the RDMA resources of the local RDMA device,
  * of a Targte or a Source
  */
 struct rdma_device;
@@ -52,13 +52,13 @@ struct rdma_device;
  */
 struct rdma_buffer;
 
-/* 
+/*
  * Open a RDMA device and allocated requiered resources.
  * find the capable RDMA device based on the 'addr' as an ip address
  * of the RDMA device selected to preform the RDMA operations.
  * Creates a PD, CQ, and QP as internal HW resources.
  *
- * Source rdma_device preforms the RDMA Write operation to 
+ * Source rdma_device preforms the RDMA Write operation to
  * the Target rdma_device.
  *
  * returns: a pointer to a rdma_device object or NULL on error
@@ -66,7 +66,7 @@ struct rdma_buffer;
 struct rdma_device *rdma_open_device_target(const char *ib_dev_name /*struct sockaddr *addr*/); /* client */
 struct rdma_device *rdma_open_device_source(const char *ib_dev_name /*struct sockaddr *addr*/); /* server */
 
-/* 
+/*
  * Close and release all rdma_device resources
  */
 void rdma_close_device(struct rdma_device *device);
@@ -77,21 +77,22 @@ void rdma_close_device(struct rdma_device *device);
 struct rdma_buffer *rdma_buffer_reg(struct rdma_device device, void *addr, size_t length);
 void rdma_buffer_dereg(struct rdma_buffer *buffer);
 
-/* 
- * Get a rdma_buffer addr string representation
- * 
- * The Target application should pass this address string to the 
+/*
+ * Get a rdma_buffer address description string representation
+ *
+ * The Target application should pass this description string to the
  * Source which will issue the RDMA Write operation
  *
- * addr is input and output holding the rdma_buffer information
- * length is the size of the allocated addr
- * 
- * returns: an integer equal to the size of the data copied into addr
+ * desc_str is input and output holding the rdma_buffer information
+ * desc_length is input size in bytes of desc_str
+ *
+ * returns: an integer equal to the size of the data copied into desc_str
  */
-int rdma_buffer_get_addr_str(struct rdma_buffer *buffer, char *buffer_addr, size_t length);
+int rdma_buffer_get_desc_str(struct rdma_buffer *buffer, char *desc_str, size_t desc_length);
 
 struct rdma_write_attr {
-	char               *remote_buffer_addr_str;
+	char               *remote_buf_desc_str;
+	size_t              remote_buf_desc_length;
 	struct rdma_buffer *local_buf_rdma;
 	struct iovec       *local_buf_iovec;
 	int                 local_buf_iovcnt;
