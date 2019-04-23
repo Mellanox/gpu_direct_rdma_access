@@ -63,8 +63,8 @@ struct rdma_buffer;
  *
  * returns: a pointer to a rdma_device object or NULL on error
  */
-struct rdma_device *rdma_open_device_target(const char *ib_dev_name /*struct sockaddr *addr*/); /* client */
-struct rdma_device *rdma_open_device_source(const char *ib_dev_name /*struct sockaddr *addr*/); /* server */
+struct rdma_device *rdma_open_device_target(const char *ib_dev_name /*struct sockaddr *addr*/, int ib_port); /* client */
+struct rdma_device *rdma_open_device_source(const char *ib_dev_name /*struct sockaddr *addr*/, int ib_port); /* server */
 
 /*
  * Close and release all rdma_device resources
@@ -74,7 +74,7 @@ void rdma_close_device(struct rdma_device *device);
 /*
  * register and deregister an applciation buffer with the RDMA device
  */
-struct rdma_buffer *rdma_buffer_reg(struct rdma_device device, void *addr, size_t length);
+struct rdma_buffer *rdma_buffer_reg(struct rdma_device *device, void *addr, size_t length);
 void rdma_buffer_dereg(struct rdma_buffer *buffer);
 
 /*
@@ -93,6 +93,8 @@ int rdma_buffer_get_desc_str(struct rdma_buffer *buffer, char *desc_str, size_t 
 struct rdma_write_attr {
 	char               *remote_buf_desc_str;
 	size_t              remote_buf_desc_length;
+    char               *remote_dev_desc_str; //MB
+	size_t              remote_dev_desc_length; //MB
 	struct rdma_buffer *local_buf_rdma;
 	struct iovec       *local_buf_iovec;
 	int                 local_buf_iovcnt;
