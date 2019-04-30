@@ -33,6 +33,9 @@
 #ifndef _RDMA_WRITE_TO_GPU_H_
 #define _RDMA_WRITE_TO_GPU_H_
 
+/* This file defines `enum ibv_mtu'  */
+#include <infiniband/verbs.h>
+#include <infiniband/mlx5dv.h>
 /* This file defines `struct iovec'  */
 #include <bits/uio.h>
 
@@ -71,10 +74,17 @@ struct rdma_device *rdma_open_device_source(const char *ib_dev_name /*struct soc
  */
 void rdma_close_device(struct rdma_device *device);
 
+
+// TODO - change to static
+int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev, int gidx);
+int modify_target_qp_to_rtr(struct rdma_device *rdma_dev, enum ibv_mtu mtu);
+int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu mtu);
+
 /*
  * register and deregister an applciation buffer with the RDMA device
  */
 struct rdma_buffer *rdma_buffer_reg(struct rdma_device *device, void *addr, size_t length);
+struct rdma_buffer *rdma_local_buffer_reg(struct rdma_device *rdma_dev, void *addr, size_t length);
 void rdma_buffer_dereg(struct rdma_buffer *buffer);
 
 /*
@@ -93,8 +103,6 @@ int rdma_buffer_get_desc_str(struct rdma_buffer *buffer, char *desc_str, size_t 
 struct rdma_write_attr {
 	char               *remote_buf_desc_str;
 	size_t              remote_buf_desc_length;
-    char               *remote_dev_desc_str; //MB
-	size_t              remote_dev_desc_length; //MB
 	struct rdma_buffer *local_buf_rdma;
 	struct iovec       *local_buf_iovec;
 	int                 local_buf_iovcnt;
@@ -107,13 +115,15 @@ struct rdma_write_attr {
  * The local_iov gather list, of size local_iovcnt, hold the buffer addr & size
  * pairs, and should be in the range of the local_buffer, which holds relevant
  * the rdma info
+ * We don't pass struct rdma_device as parameter, because we can get it using
+ * rdma_write_attr struct field local_buf_rdma
  *
  * On completion of the RDMA operation, the status and wr_id will be reported
  * from rdma_poll_completions()
  *
  * returns: 0 on success, or the value of errno on failure
  */
-int rdma_write_to_peer(struct rdma_device *device, struct rdma_write_attr *attr);
+int rdma_write_to_peer(struct rdma_write_attr *attr);
 
 enum rdma_completion_status {
 	RDMA_STATUS_SUCCESS,

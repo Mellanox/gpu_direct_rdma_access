@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006 Cisco Systems.  All rights reserved.
+ * Copyright (c) 2019 Mellanox Technologies, Inc.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -30,17 +30,34 @@
  * SOFTWARE.
  */
 
-#ifndef IBV_PINGPONG_H
-#define IBV_PINGPONG_H
+#ifndef _UTILS_H_
+#define _UTILS_H_
 
+/* This file defines `enum ibv_mtu'  */
 #include <infiniband/verbs.h>
-#include <infiniband/mlx5dv.h>
-//#include <infiniband/verbs_exp.h>
 
-enum ibv_mtu pp_mtu_to_enum(int mtu);
-uint16_t pp_get_local_lid(struct ibv_context *context, int port);
-int pp_get_port_info(struct ibv_context *context, int port, struct ibv_port_attr *attr);
-void wire_gid_to_gid(const char *wgid, union ibv_gid *gid);
-void gid_to_wire_gid(const union ibv_gid *gid, char wgid[]);
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-#endif /* IBV_PINGPONG_H */
+/*
+ * Convert MTU integer value to enum ibv_mtu.
+ *
+ * returns: enum ibv_mtu corresponding to the given MTU or -1 on error
+ */
+enum ibv_mtu mtu_to_enum(int mtu);
+
+/*
+ * Print program run time.
+ *
+ * returns: 0 on success or 1 on error
+ */
+int print_run_time(struct timeval start, unsigned long size, int iters);
+
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _UTILS_H_ */
+

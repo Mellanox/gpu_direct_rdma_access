@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006 Cisco Systems.  All rights reserved.
+ * Copyright (c) 2019 Mellanox Technologies, Inc.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -30,60 +30,36 @@
  * SOFTWARE.
  */
 
-#include "write_to_gpu.h"
-#include <arpa/inet.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
+#ifndef _GPU_MEM_UTIL_H_
+#define _GPU_MEM_UTIL_H_
 
-enum ibv_mtu pp_mtu_to_enum(int mtu)
-{
-	switch (mtu) {
-	case 256:  return IBV_MTU_256;
-	case 512:  return IBV_MTU_512;
-	case 1024: return IBV_MTU_1024;
-	case 2048: return IBV_MTU_2048;
-	case 4096: return IBV_MTU_4096;
-	default:   return -1;
-	}
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * Memory allocation on CPU or GPU according to HAVE_CUDA pre-compile option and use_cuda flag
+ *
+ * returns: a pointer to the allocated buffer or NULL on error
+ */
+#ifdef HAVE_CUDA
+void *work_buffer_alloc(size_t length, int use_cuda);
+#else
+void *work_buffer_alloc(size_t length);
+#endif //HAVE_CUDA
+
+/*
+ * CPU or GPU memory free, according to HAVE_CUDA pre-compile option and use_cuda flag
+ */
+#ifdef HAVE_CUDA
+void work_buffer_free(void *buff, int use_cuda);
+#else
+void work_buffer_free(void *buff);
+#endif //HAVE_CUDA
+
+
+#ifdef __cplusplus
 }
+#endif
 
-uint16_t pp_get_local_lid(struct ibv_context *context, int port)
-{
-	struct ibv_port_attr attr;
-
-	if (ibv_query_port(context, port, &attr))
-		return 0;
-
-	return attr.lid;
-}
-
-int pp_get_port_info(struct ibv_context *context, int port,
-		     struct ibv_port_attr *attr)
-{
-	return ibv_query_port(context, port, attr);
-}
-
-void wire_gid_to_gid(const char *wgid, union ibv_gid *gid)
-{
-	char tmp[9];
-	uint32_t v32;
-	uint32_t *raw = (uint32_t *)gid->raw;
-	int i;
-
-	for (tmp[8] = 0, i = 0; i < 4; ++i) {
-		memcpy(tmp, wgid + i * 8, 8);
-		sscanf(tmp, "%x", &v32);
-		raw[i] = ntohl(v32);
-	}
-}
-
-void gid_to_wire_gid(const union ibv_gid *gid, char wgid[])
-{
-	int i;
-	uint32_t *raw = (uint32_t *)gid->raw;
-
-	for (i = 0; i < 4; ++i)
-		sprintf(&wgid[i * 8], "%08x",
-			htonl(raw[i]));
-}
+#endif /* _GPU_MEM_UTIL_H_ */

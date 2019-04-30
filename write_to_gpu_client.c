@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005 Topspin Communications.  All rights reserved.
+ * Copyright (c) 2019 Mellanox Technologies, Inc.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -30,10 +30,6 @@
  * SOFTWARE.
  */
 
-#if HAVE_CONFIG_H
-#  include <config.h>
-#endif /* HAVE_CONFIG_H */
-
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,12 +44,8 @@
 #include <arpa/inet.h>
 #include <time.h>
 
-#ifdef HAVE_CUDA
-#include "/usr/local/cuda/include/cuda.h"
-#include "/usr/local/cuda/include/cuda_runtime_api.h"
-#endif //HAVE_CUDA
-
-#include "write_to_gpu.h"
+#include "utils.h"
+#include "gpu_mem_util.h"
 #include "rdma_write_to_gpu.h"
 
 static int debug = 1;
@@ -62,27 +54,6 @@ static int debug_fast_path = 1;
 #define DEBUG_LOG_FAST_PATH if (debug_fast_path) printf
 #define FDEBUG_LOG if (debug) fprintf
 #define FDEBUG_LOG_FAST_PATH if (debug_fast_path) fprintf
-
-#define CQ_DEPTH	8
-#define DC_KEY 0xffeeddcc
-
-/* RDMA control buffer */
-struct rdma_device {
-
-    struct ibv_context     *context;
-    struct ibv_pd          *pd;
-    struct ibv_mr          *gpu_mr;
-    struct ibv_cq          *cq;
-    struct ibv_srq         *srq; /* for DCT only */
-    struct ibv_qp          *qp;
-    void                   *gpu_buf;
-    unsigned long           gpu_buf_size;
-    struct ibv_port_attr    portinfo;
-    int                     sockfd;
-
-    int                     use_cuda;
-
-};
 
 struct user_params {
 
@@ -97,490 +68,54 @@ struct user_params {
     char                *servername;
 };
 
-//struct pingpong_dest {
-//    int             lid;
-//    int             qpn;
-//    int             psn;
-//    union ibv_gid   gid;
-//};
-struct rdma_buffer {
-    /* Buffer Related fields */
-    uint64_t	    addr;
-    uint32_t        size;
-    uint32_t        rkey;
-    /* QP related fields */
-    uint64_t        dc_key;
-    uint32_t        dctn; /*QP num*/
-    /* IB device (address handler) relateed fields */
-    union ibv_gid   gid;
-    uint16_t        lid;
-};
-
-//============================================================================================
-//       CUDA START === CUDA START === CUDA START
-//============================================================================================
-#ifdef HAVE_CUDA
-#define ASSERT(x)   \
-    do {            \
-        if (!(x)) { \
-            fprintf(stdout, "Assertion \"%s\" failed at %s:%d\n", #x, __FILE__, __LINE__);\
-        }           \
-    } while (0)
-
-#define CUCHECK(stmt)                   \
-    do {                                \
-        CUresult result = (stmt);       \
-        ASSERT(CUDA_SUCCESS == result); \
-    } while (0)
-
-/*----------------------------------------------------------------------------*/
-
-static CUdevice cuDevice;
-static CUcontext cuContext;
-
-static int init_gpu(struct rdma_device *cb, size_t _size)
+/****************************************************************************************
+ * Open socket connection on the client side, try to connect to the server by the given
+ * IP address (servername). If success, return the connected socket file descriptor ID
+ * Return value: socket fd - success, -1 - error
+ ****************************************************************************************/
+static int open_client_socket(const char *servername,
+                              int         port)
 {
-    const size_t gpu_page_size = 64*1024;
-    size_t size = (_size + gpu_page_size - 1) & ~(gpu_page_size - 1);
-    printf("initializing CUDA\n");
-    CUresult error = cuInit(0);
-    if (error != CUDA_SUCCESS) {
-        printf("cuInit(0) returned %d\n", error);
-        exit(1);
-    }
-
-    int deviceCount = 0;
-    error = cuDeviceGetCount(&deviceCount);
-    if (error != CUDA_SUCCESS) {
-        printf("cuDeviceGetCount() returned %d\n", error);
-        exit(1);
-    }
-    /* This function call returns 0 if there are no CUDA capable devices. */
-    if (deviceCount == 0) {
-        printf("There are no available device(s) that support CUDA\n");
-        return 1;
-    } else if (deviceCount == 1)
-        printf("There is 1 device supporting CUDA\n");
-    else
-        printf("There are %d devices supporting CUDA, picking first...\n", deviceCount);
-
-    int devID = 0;
-
-    /* pick up device with zero ordinal (default, or devID) */
-    CUCHECK(cuDeviceGet(&cuDevice, devID));
-
-    char name[128];
-    CUCHECK(cuDeviceGetName(name, sizeof(name), devID));
-    printf("[pid = %d, dev = %d] device name = [%s]\n", getpid(), cuDevice, name);
-    printf("creating CUDA Contnext\n");
-
-    /* Create context */
-    error = cuCtxCreate(&cuContext, CU_CTX_MAP_HOST, cuDevice);
-    if (error != CUDA_SUCCESS) {
-        printf("cuCtxCreate() error=%d\n", error);
-        return 1;
-    }
-
-    printf("making it the current CUDA Context\n");
-    error = cuCtxSetCurrent(cuContext);
-    if (error != CUDA_SUCCESS) {
-        printf("cuCtxSetCurrent() error=%d\n", error);
-        return 1;
-    }
-
-    printf("cuMemAlloc() of a %zd bytes GPU buffer\n", size);
-    CUdeviceptr d_A;
-    error = cuMemAlloc(&d_A, size);
-    if (error != CUDA_SUCCESS) {
-        printf("cuMemAlloc error=%d\n", error);
-        return 1;
-    }
-    printf("allocated GPU buffer address at %016llx pointer=%p\n", d_A,
-           (void *) d_A);
-    cb->gpu_buf = (void*)d_A;
-
-    return 0;
-}
-
-static int free_gpu(struct rdma_device *cb)
-{
-    int ret = 0;
-    CUdeviceptr d_A = (CUdeviceptr) cb->gpu_buf;
-
-    printf("deallocating RX GPU buffer\n");
-    cuMemFree(d_A);
-    d_A = 0;
-
-    printf("destroying current CUDA Context\n");
-    CUCHECK(cuCtxDestroy(cuContext));
-
-    return ret;
-}
-#endif //HAVE_CUDA
-//============================================================================================
-// ???
-static int pp_connect_ctx(struct rdma_device *cb, struct user_params *usr_par,
-                          int my_psn, struct pingpong_dest *dest)
-{
-    struct ibv_qp_attr attr = {
-        .qp_state           = IBV_QPS_RTR,
-        .path_mtu           = usr_par->mtu,
-//        .dest_qp_num        = dest->qpn, //for RC only
-//        .rq_psn             = dest->psn, //for RC only
-//        .max_dest_rd_atomic = 1, //for RC only
-        .min_rnr_timer      = 16,  // 12 for RC
-        .ah_attr            = {
-            .is_global      = 0,
-//            .dlid           = dest->lid, // for RC only
-            .sl             = 0,
-            .src_path_bits  = 0,
-            .port_num       = usr_par->ib_port
-        }
-    };
-    enum ibv_qp_attr_mask attr_mask;
-
-    if (dest->gid.global.interface_id) {
-        attr.ah_attr.is_global = 1;
-        attr.ah_attr.grh.hop_limit = 1;
-//        attr.ah_attr.grh.dgid = dest->gid; // for RC only
-        attr.ah_attr.grh.sgid_index = usr_par->gidx;
-    }
-    attr_mask = IBV_QP_STATE              |
-                IBV_QP_AV                 |
-                IBV_QP_PATH_MTU           |
-//                IBV_QP_DEST_QPN           | //RC
-//                IBV_QP_RQ_PSN             | //RC
-                IBV_QP_MIN_RNR_TIMER; // for DCT
-
-    if (ibv_modify_qp(cb->qp, &attr, attr_mask)) {
-        fprintf(stderr, "Failed to modify QP to RTR\n");
-        return 1;
-    }
-
-    /*We don't need pass to RNR for DCT side*/
-
-    return 0;
-}
-
-static struct pingpong_dest *pp_client_exch_dest(struct rdma_device *cb,
-                                                 const char *servername,
-                                                 int port,
-                                                 const struct pingpong_dest *my_dest)
-{
-    struct addrinfo *res, *t;
+    struct addrinfo *res,
+                    *t;
     struct addrinfo hints = {
         .ai_family   = AF_UNSPEC,
         .ai_socktype = SOCK_STREAM
     };
-    char *service;
-    char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
-    int n;
-    struct pingpong_dest *rem_dest = NULL;
-    char gid[33];
+    char   *service;
+    int     ret_val;
+    int     sockfd;
 
     if (asprintf(&service, "%d", port) < 0)
-        return NULL;
+        return -1;
 
-    n = getaddrinfo(servername, service, &hints, &res);
+    ret_val = getaddrinfo(servername, service, &hints, &res);
 
-    if (n < 0) {
-        fprintf(stderr, "%s for %s:%d\n", gai_strerror(n), servername, port);
+    if (ret_val < 0) {
+        fprintf(stderr, "%s for %s:%d\n", gai_strerror(ret_val), servername, port);
         free(service);
-        return NULL;
+        return -1;
     }
 
     for (t = res; t; t = t->ai_next) {
-        cb->sockfd = socket(t->ai_family, t->ai_socktype, t->ai_protocol);
-        if (cb->sockfd >= 0) {
-            if (!connect(cb->sockfd, t->ai_addr, t->ai_addrlen))
+        sockfd = socket(t->ai_family, t->ai_socktype, t->ai_protocol);
+        if (sockfd >= 0) {
+            if (!connect(sockfd, t->ai_addr, t->ai_addrlen))
                 break;
-            close(cb->sockfd);
-            cb->sockfd = -1;
+            close(sockfd);
+            sockfd = -1;
         }
     }
 
     freeaddrinfo(res);
     free(service);
 
-    if (cb->sockfd < 0) {
+    if (sockfd < 0) {
         fprintf(stderr, "Couldn't connect to %s:%d\n", servername, port);
-        return NULL;
+        return -1;
     }
 
-    gid_to_wire_gid(&my_dest->gid, gid);
-    sprintf(msg, "%04x:%06x:%06x:%s", my_dest->lid, my_dest->qpn, my_dest->psn, gid);
-    DEBUG_LOG ("exch_dest:  before send  \"%s\"\n", msg);
-    if (write(cb->sockfd, msg, sizeof msg) != sizeof msg) {
-        fprintf(stderr, "Couldn't send local address\n");
-        return NULL;
-    }
-
-    if (recv(cb->sockfd, msg, sizeof(msg), MSG_WAITALL) != sizeof(msg)) {
-        perror("client read");
-        fprintf(stderr, "Couldn't read remote address\n");
-        return NULL;
-    }
-    DEBUG_LOG ("exch_dest: after receive \"%s\"\n", msg);
-
-//    if (write(cb->sockfd, "done", sizeof("done")) != sizeof("done")) {
-//        fprintf(stderr, "Couldn't send \"done\" msg\n");
-//        return NULL;
-//    }
-
-    rem_dest = malloc(sizeof *rem_dest);
-    if (!rem_dest) {
-        fprintf(stderr, "rem_dest memory allocation failed\n");
-        return NULL;
-    }
-
-    sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn,
-                        &rem_dest->psn, gid);
-    wire_gid_to_gid(gid, &rem_dest->gid);
-    DEBUG_LOG ("Rem GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
-           rem_dest->gid.raw[0], rem_dest->gid.raw[1], rem_dest->gid.raw[2], rem_dest->gid.raw[3],
-           rem_dest->gid.raw[4], rem_dest->gid.raw[5], rem_dest->gid.raw[6], rem_dest->gid.raw[7], 
-           rem_dest->gid.raw[8], rem_dest->gid.raw[9], rem_dest->gid.raw[10], rem_dest->gid.raw[11],
-           rem_dest->gid.raw[12], rem_dest->gid.raw[13], rem_dest->gid.raw[14], rem_dest->gid.raw[15] );
-
-    return rem_dest;
-}
-
-static struct rdma_device *pp_init_ctx(struct ibv_device *ib_dev,
-                                   struct user_params *usr_par)
-{
-    struct rdma_device *cb;
-    int             ret;
-
-    cb = calloc(1, sizeof *cb);
-    if (!cb)
-        return NULL;
-
-    cb->gpu_buf_size = usr_par->size;
-    cb->sockfd       = -1;
-
-#ifdef HAVE_CUDA
-    cb->use_cuda = usr_par->use_cuda;
-    if (cb->use_cuda) {
-        if (init_gpu(cb, cb->gpu_buf_size)) {
-            fprintf(stderr, "Couldn't allocate work buf.\n");
-            return NULL;
-        }
-    } else
-#endif //HAVE_CUDA
-    {
-        // Mem allocation on CPU
-        int page_size = sysconf(_SC_PAGESIZE);
-        cb->gpu_buf = memalign(page_size, usr_par->size);
-        if (!cb->gpu_buf) {
-            fprintf(stderr, "Couldn't allocate buffer for rdma_write from server.\n");
-            goto clean_ctx;
-        }
-    }
-    DEBUG_LOG ("ibv_open_device(%p)\n", ib_dev);
-    cb->context = ibv_open_device(ib_dev);
-    if (!cb->context) {
-        fprintf(stderr, "Couldn't get context for %s\n",
-            ibv_get_device_name(ib_dev));
-        goto clean_buffer;
-    }
-
-
-    DEBUG_LOG ("ibv_alloc_pd(%p)\n", cb->context);
-    cb->pd = ibv_alloc_pd(cb->context);
-    if (!cb->pd) {
-        fprintf(stderr, "Couldn't allocate PD\n");
-        goto clean_device;
-    }
-
-    cb->gpu_mr = ibv_reg_mr(cb->pd, cb->gpu_buf, usr_par->size,
-                             IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE );
-    DEBUG_LOG("ibv_reg_mr completed: buf %p, size = %lu, rkey = 0x%08x\n",
-               cb->gpu_buf, usr_par->size, cb->gpu_mr->rkey);
-
-    if (!cb->gpu_mr) {
-        fprintf(stderr, "Couldn't register GPU MR\n");
-        goto clean_pd;
-    }
-    
-#ifdef HAVE_CUDA
-    if (!cb->use_cuda) {
-        /* FIXME memset(cb->buf, 0, size); */
-        memset(cb->gpu_buf, 0x7b, usr_par->size);
-    }
-#else
-    /* FIXME memset(cb->buf, 0, size); */
-    memset(cb->gpu_buf, 0x7b, usr_par->size);
-#endif //HAVE_CUDA
-
-    DEBUG_LOG ("ibv_create_cq(%p, %d, NULL, NULL, 0)\n", cb->context, CQ_DEPTH);
-    cb->cq = ibv_create_cq(cb->context, CQ_DEPTH, NULL, NULL, 0);
-    if (!cb->cq) {
-        fprintf(stderr, "Couldn't create CQ\n");
-        goto clean_mr;
-    }
-
-    /* - - - - - - -  Create SRQ  - - - - - - - */
-    struct ibv_srq_init_attr srq_attr;
-    memset(&srq_attr, 0, sizeof(srq_attr));
-    srq_attr.attr.max_wr = 2;
-    srq_attr.attr.max_sge = 1;
-    cb->srq = ibv_create_srq(cb->pd, &srq_attr);
-    if (!cb->srq) {
-        fprintf(stderr, "ibv_create_srq failed\n");
-        goto clean_cq;
-    }
-    DEBUG_LOG("created srq %p\n", cb->srq);
-
-    {
-        struct ibv_qp_init_attr_ex attr_ex;
-        struct mlx5dv_qp_init_attr attr_dv;
-
-        memset(&attr_ex, 0, sizeof(attr_ex));
-        memset(&attr_dv, 0, sizeof(attr_dv));
-
-        attr_ex.qp_type = IBV_QPT_DRIVER;
-        attr_ex.send_cq = cb->cq;
-        attr_ex.recv_cq = cb->cq;
-
-        attr_ex.comp_mask |= IBV_QP_INIT_ATTR_PD;
-        attr_ex.pd = cb->pd;
-        attr_ex.srq = cb->srq; /* Should use SRQ for client only (DCT) */
-        
-        /* create DCT */
-        attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_DC;
-        attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCT;
-        attr_dv.dc_init_attr.dct_access_key = DC_KEY;
-
-        DEBUG_LOG ("mlx5dv_create_qp(%p,%p,%p)\n", cb->context, &attr_ex, &attr_dv);
-        cb->qp = mlx5dv_create_qp(cb->context, &attr_ex, &attr_dv);
-
-        if (!cb->qp)  {
-            fprintf(stderr, "Couldn't create QP\n");
-            goto clean_srq;
-        }
-    }
-
-    {
-        struct ibv_qp_attr attr = {
-            .qp_state        = IBV_QPS_INIT,
-            .pkey_index      = 0,
-            .port_num        = usr_par->ib_port,
-            .qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE
-        };
-
-        if (ibv_modify_qp(cb->qp, &attr,
-                  IBV_QP_STATE              |
-                  IBV_QP_PKEY_INDEX         |
-                  IBV_QP_PORT               |
-                  IBV_QP_ACCESS_FLAGS)) {
-            fprintf(stderr, "Failed to modify QP to INIT\n");
-            goto clean_qp;
-        }
-    }
-
-
-    return cb;
-
-
-clean_qp:
-    ibv_destroy_qp(cb->qp);
-
-clean_cq:
-    ibv_destroy_cq(cb->cq);
-
-clean_srq:
-    ibv_destroy_srq(cb->srq);
-
-clean_mr:
-    ibv_dereg_mr(cb->gpu_mr);
-
-clean_pd:
-    ibv_dealloc_pd(cb->pd);
-
-clean_device:
-    ibv_close_device(cb->context);
-
-clean_buffer:
-#ifdef HAVE_CUDA
-    if (cb->use_cuda) {
-        free_gpu(cb);
-    } else
-#endif //HAVE_CUDA
-    {
-        free(cb->gpu_buf);
-    }
-
-clean_ctx:
-    free(cb);
-
-    return NULL;
-}
-
-int pp_close_ctx(struct rdma_device *cb)
-{
-    int rc;
-    DEBUG_LOG("ibv_destroy_qp(%p)\n", cb->qp);
-    rc = ibv_destroy_qp(cb->qp);
-    if (rc) {
-        fprintf(stderr, "Couldn't destroy QP: error %d\n", rc);
-        return 1;
-    }
-
-    DEBUG_LOG("ibv_destroy_cq(%p)\n", cb->cq);
-    rc = ibv_destroy_cq(cb->cq);
-    if (rc) {
-        fprintf(stderr, "Couldn't destroy CQ, error %d\n", rc);
-        return 1;
-    }
-
-	if (cb->srq) {
-        DEBUG_LOG("ibv_destroy_srq(%p)\n", cb->srq);
-        rc = ibv_destroy_srq(cb->srq);
-        if (rc) {
-            fprintf(stderr, "Couldn't destroy SRQ\n");
-            return 1;
-        }
-    }
-    
-    DEBUG_LOG("ibv_dereg_mr(%p)\n", cb->gpu_mr);
-    rc = ibv_dereg_mr(cb->gpu_mr);
-    if (rc) {
-        fprintf(stderr, "Couldn't deregister MR, error %d\n", rc);
-        return 1;
-    }
-    
-    DEBUG_LOG("ibv_dealloc_pd(%p)\n", cb->pd);
-    rc = ibv_dealloc_pd(cb->pd);
-    if (rc) {
-        fprintf(stderr, "Couldn't deallocate PD, error %d\n", rc);
-        return 1;
-    }
-
-    DEBUG_LOG("ibv_close_device(%p)\n", cb->context);
-    rc = ibv_close_device(cb->context);
-    if (rc) {
-        fprintf(stderr, "Couldn't release context, error %d\n", rc);
-        return 1;
-    }
-
-    if (cb->sockfd != -1) {
-        DEBUG_LOG("close socket(%p)\n", cb->sockfd);
-        close(cb->sockfd);
-    }
-    
-#ifdef HAVE_CUDA
-    if (cb->use_cuda) {
-        free_gpu(cb);
-    } else
-#endif //HAVE_CUDA
-    {
-        DEBUG_LOG("free memory buffer(%p)\n", cb->gpu_buf);
-        free(cb->gpu_buf);
-    }
-
-    free(cb);
-
-    return 0;
+    return sockfd;
 }
 
 static void usage(const char *argv0)
@@ -663,7 +198,7 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             break;
 
         case 'm':
-            usr_par->mtu = pp_mtu_to_enum(strtol(optarg, NULL, 0));
+            usr_par->mtu = mtu_to_enum(strtol(optarg, NULL, 0));
             if (usr_par->mtu < 0) {
                 usage(argv[0]);
                 return 1;
@@ -717,60 +252,74 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
 
 int main(int argc, char *argv[])
 {
-    struct ibv_device     **dev_list;
-    struct ibv_device      *ib_dev;
-    struct rdma_device     *cb;
-    struct pingpong_dest    my_dest;
-    struct pingpong_dest   *rem_dest;
-    struct timeval          start, end;
-    int                     routs;
+    struct rdma_device     *rdma_dev;
+    struct timeval          start;
     int                     cnt;
-    char                    gid[INET6_ADDRSTRLEN];
     struct user_params      usr_par;
-    int                     ret;
+    int                     ret_val = 0;
+    int                     sockfd;
 
     srand48(getpid() * time(NULL));
 
     ret_val = parse_command_line(argc, argv, &usr_par);
-   if (ret_val) {
-       return ret_val;
-   }
-
-   rdma_dev = rdma_open_device_target(const char *ib_dev_name, int ib_port) /* client */
-   if (!rdma_dev) {
-       return 1;
-   }
-
-   ret_val = rdma_set_lid_gid_from_port_info(rdma_dev, usr_par->gidx)
-   if (ret_val) {
-       return ret_val;
-   }
-
-    my_dest.qpn = cb->qp->qp_num;
-    my_dest.psn = 0; //lrand48() & 0xffffff;
-    inet_ntop(AF_INET6, &my_dest.gid, gid, sizeof gid);
-    printf("  local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-           my_dest.lid, my_dest.qpn, my_dest.psn, gid);
-
-
-    DEBUG_LOG ("Remote server name \"%s\"\n", usr_par.servername);
-    rem_dest = pp_client_exch_dest(cb, usr_par.servername, usr_par.port, &my_dest);
+    if (ret_val) {
+        return ret_val;
+    }
+    
+    DEBUG_LOG ("Connecting to remote server \"%s\"\n", usr_par.servername);
+    sockfd = open_client_socket(usr_par.servername, usr_par.port);
     free(usr_par.servername);
 
-    if (!rem_dest)
+    if (sockfd < 0) {
+        if (usr_par.ib_devname) {
+            free(usr_par.ib_devname);
+        }
         return 1;
+    }
 
-    inet_ntop(AF_INET6, &rem_dest->gid, gid, sizeof gid);
-    printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-           rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
+    rdma_dev = rdma_open_device_target(usr_par.ib_devname, usr_par.ib_port); /* client */
+    if (usr_par.ib_devname) {
+        free(usr_par.ib_devname);
+    }
+    if (!rdma_dev) {
+        ret_val = 1;
+        goto clean_socket;
+    }
+    
+    ret_val = rdma_set_lid_gid_from_port_info(rdma_dev, usr_par.gidx);
+    if (ret_val) {
+        goto clean_device;
+    }
 
-    if (pp_connect_ctx(cb, &usr_par, my_dest.psn, rem_dest))
-        return 1;
-
-
+    ret_val = modify_target_qp_to_rtr(rdma_dev, usr_par.mtu);
+    if (ret_val) {
+        goto clean_device;
+    }
+    
     if (gettimeofday(&start, NULL)) {
         perror("gettimeofday");
-        return 1;
+        ret_val = 1;
+        goto clean_device;
+    }
+
+    /* CPU or GPU memory buffer allocation */
+    void    *buff;
+#ifdef HAVE_CUDA
+    buff = work_buffer_alloc(usr_par.size, usr_par.use_cuda);
+#else
+    buff = work_buffer_alloc(usr_par.size);
+#endif //HAVE_CUDA
+    if (!buff) {
+        ret_val = 1;
+        goto clean_device;
+    }
+    /* RDMA buffer registration */
+    struct rdma_buffer *rdma_buff;
+
+    rdma_buff = rdma_buffer_reg(rdma_dev, buff, usr_par.size);
+    if (!rdma_buff) {
+        ret_val = 1;
+        goto clean_mem_buff;
     }
 
     /****************************************************************************************************
@@ -778,57 +327,67 @@ int main(int argc, char *argv[])
      */
     for (cnt = 0; cnt < usr_par.iters; cnt++) {
 
-        char sendmsg[sizeof "0102030405060708:01020304:01020304:01020304"];
+        char desc_str[sizeof "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10"];
         char ackmsg[sizeof "rdma_write completed"];
-
+        int  ret_size;
+        
         // Sending RDMA data (address and rkey) by socket as a triger to start RDMA write operation
-        sprintf(sendmsg, "%016llx:%08lx:%08x:%08x", (unsigned long long)cb->gpu_buf, cb->gpu_buf_size, cb->gpu_mr->rkey, cb->qp->qp_num);
-        DEBUG_LOG_FAST_PATH("Send message N %d: \"%s\" to the server\n", cnt, sendmsg);
-        if (write(cb->sockfd, sendmsg, sizeof sendmsg) != sizeof sendmsg) {
-            fprintf(stderr, "Couldn't send RDMA data for iteration\n");
-            return 1;
+        ret_size = rdma_buffer_get_desc_str(rdma_buff, desc_str, sizeof desc_str);
+        if (!ret_size) {
+            ret_val = 1;
+            goto clean_mem_buff;
+        }
+        
+        DEBUG_LOG_FAST_PATH("Send message N %d: buffer desc \"%s\", device desc \"%s\"\n",
+                            cnt, desc_str, desc_str + sizeof "0102030405060708:01020304:01020304");
+        ret_size = write(sockfd, desc_str, sizeof desc_str);
+        if (ret_size != sizeof desc_str) {
+            perror("client write");
+            fprintf(stderr, "Couldn't send RDMA data for iteration, write data size %d\n", ret_size);
+            ret_val = 1;
+            goto clean_mem_buff;
         }
         
         // Wating for confirmation message from the socket that rdma_write from the server has beed completed
-        if (recv(cb->sockfd, ackmsg, sizeof(ackmsg), MSG_WAITALL) != sizeof(ackmsg)) {
+        ret_size = recv(sockfd, ackmsg, sizeof ackmsg, MSG_WAITALL);
+        if (ret_size != sizeof ackmsg) {
             perror("client read");
-            fprintf(stderr, "Couldn't read \"rdma_write completed\" message\n");
-            return 1;
+            fprintf(stderr, "Couldn't read \"rdma_write completed\" message, recv data size %d\n", ret_size);
+            ret_val = 1;
+            goto clean_mem_buff;
         }
 
         // Printing received data for debug purpose
         DEBUG_LOG_FAST_PATH("Received ack N %d: \"%s\"\n", cnt, ackmsg);
 #ifdef HAVE_CUDA
-        if (!cb->use_cuda) {
-            DEBUG_LOG_FAST_PATH("Written data \"%s\"\n", (char*)cb->gpu_buf);
+        if (!usr_par.use_cuda) {
+            DEBUG_LOG_FAST_PATH("Written data \"%s\"\n", (char*)buff);
         }
 #else
-    DEBUG_LOG_FAST_PATH("Written data \"%s\"\n", (char*)cb->gpu_buf);
+        DEBUG_LOG_FAST_PATH("Written data \"%s\"\n", (char*)buff);
 #endif //HAVE_CUDA
     }
     /****************************************************************************************************/
 
-    if (gettimeofday(&end, NULL)) {
-        perror("gettimeofday");
-        return 1;
+    ret_val = print_run_time(start, usr_par.size, usr_par.iters);
+    if (ret_val) {
+        goto clean_mem_buff;
     }
 
-    {
-        float usec = (end.tv_sec - start.tv_sec) * 1000000 +
-            (end.tv_usec - start.tv_usec);
-        long long bytes = (long long) usr_par.size * usr_par.iters * 2;
+clean_mem_buff:
+ #ifdef HAVE_CUDA
+    work_buffer_free(buff, usr_par.use_cuda);
+ #else
+    work_buffer_free(buff);
+ #endif //HAVE_CUDA
 
-        printf("%lld bytes in %.2f seconds = %.2f Mbit/sec\n",
-               bytes, usec / 1000000., bytes * 8. / usec);
-        printf("%d iters in %.2f seconds = %.2f usec/iter\n",
-               usr_par.iters, usec / 1000000., usec / usr_par.iters);
-    }
+clean_device:
+    rdma_close_device(rdma_dev);
 
-    if (pp_close_ctx(cb))
-        return 1;
+clean_socket:
+    close(sockfd);
 
-    ibv_free_device_list(dev_list);
-    free(rem_dest);
-
-    return 0;
+    return ret_val;
 }
+
+

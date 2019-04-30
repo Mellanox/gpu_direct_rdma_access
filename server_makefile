@@ -7,19 +7,23 @@ OEXE_CL =write_to_gpu_client
 OEXE_SE =write_to_gpu_server
 
 _DEPS =
-_DEPS += write_to_gpu.h
+_DEPS += rdma_write_to_gpu.h
+_DEPS += gpu_mem_util.h
+_DEPS += utils.h
 
 DEPS = $(patsubst %,$(IDIR)/%,$(_DEPS))
 
-_SE_OBJ = write_to_gpu.o
-_SE_OBJ += write_to_gpu_server.o
+_OBJ = rdma_write_to_gpu.o
+_OBJ += gpu_mem_util.o
+_OBJ += utils.o
+_OBJ += write_to_gpu_server.o
 
-SE_OBJ = $(patsubst %,$(ODIR)/%,$(_SE_OBJ))
+SE_OBJ = $(patsubst %,$(ODIR)/%,$(_OBJ))
 
 $(ODIR)/%.o: %.c $(DEPS)
 	$(CC) -c -o $@ $< $(CFLAGS)
 
-write_to_gpu_server: $(SE_OBJ)
+$(OEXE_SE): $(SE_OBJ)
 	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
 
 .PHONY: clean

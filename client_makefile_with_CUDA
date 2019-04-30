@@ -1,8 +1,8 @@
 IDIR =.
 CC =gcc
-CFLAGS =-I$(IDIR) -g
+CFLAGS =-I$(IDIR) -g -DHAVE_CUDA
 ODIR =obj
-LIBS =-Wall -libverbs -lmlx5
+LIBS =-Wall -libverbs -lmlx5 -lcuda
 OEXE_CL =write_to_gpu_client
 OEXE_SE =write_to_gpu_server
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005 Topspin Communications.  All rights reserved.
+ * Copyright (c) 2019 Mellanox Technologies, Inc.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -48,12 +48,6 @@
 #include <arpa/inet.h>
 #include <time.h>
 
-#ifdef HAVE_CUDA
-#include "/usr/local/cuda/include/cuda.h"
-#include "/usr/local/cuda/include/cuda_runtime_api.h"
-#endif //HAVE_CUDA
-
-#include "write_to_gpu.h"
 #include "rdma_write_to_gpu.h"
 
 static int debug = 1;
@@ -66,7 +60,7 @@ static int debug_fast_path = 1;
 #define CQ_DEPTH        8
 #define SEND_Q_DEPTH    64
 #define MAX_SEND_SGE    16
-#define DC_KEY          0xffeeddcc
+#define DC_KEY          0xffeeddcc  /*this is defined for both sides: client and server*/
 
 /* RDMA control buffer */
 struct rdma_device {
@@ -82,7 +76,6 @@ struct rdma_device {
     int                 rdma_buff_cnt;
     
     /* QP related fields for DCT (client) side, DCI (server) side receives these from socket */
-    uint64_t            dc_key;
     uint32_t            dctn; /*QP num*/
 
     /* Address handler (port info) relateed fields */
@@ -94,119 +87,15 @@ struct rdma_device {
 
 struct rdma_buffer {
     /* Buffer Related fields */
-    void           *buf_addr;   //uint64_t  addr;
-    size_t          buf_size;   //uint32_t  size;
-//    int             use_cuda;
-    rdma_device    *rdma_dev;
-
+    void               *buf_addr;   //uint64_t  addr;
+    size_t              buf_size;   //uint32_t  size;
     /* MR Related fields */
-    struct ibv_mr  *mr;
-    uint32_t        rkey;
+    struct ibv_mr      *mr;
+    uint32_t            rkey;
+    /* Linked rdma_device */
+    struct rdma_device *rdma_dev;
 };
 
-//============================================================================================
-//       CUDA START === CUDA START === CUDA START
-//============================================================================================
-#ifdef HAVE_CUDA
-#define ASSERT(x)   \
-    do {            \
-        if (!(x)) { \
-            fprintf(stdout, "Assertion \"%s\" failed at %s:%d\n", #x, __FILE__, __LINE__);\
-        }           \
-    } while (0)
-
-#define CUCHECK(stmt)                   \
-    do {                                \
-        CUresult result = (stmt);       \
-        ASSERT(CUDA_SUCCESS == result); \
-    } while (0)
-
-/*----------------------------------------------------------------------------*/
-
-static CUdevice cuDevice;
-static CUcontext cuContext;
-
-static void *init_gpu(size_t gpu_buf_size)
-{
-    const size_t    gpu_page_size = 64*1024;
-    size_t          aligned_size;
-    CUresult        error;
-
-    aligned_size = (gpu_buf_size + gpu_page_size - 1) & ~(gpu_page_size - 1);
-    printf("initializing CUDA\n");
-    error = cuInit(0);
-    if (error != CUDA_SUCCESS) {
-        fprintf(stderr, "cuInit(0) returned %d\n", error);
-        return NULL;
-    }
-
-    int deviceCount = 0;
-    error = cuDeviceGetCount(&deviceCount);
-    if (error != CUDA_SUCCESS) {
-        fprintf(stderr, "cuDeviceGetCount() returned %d\n", error);
-        return NULL;
-    }
-
-    /* This function call returns NULL if there are no CUDA capable devices. */
-    if (deviceCount == 0) {
-        fprintf(stderr, "There are no available device(s) that support CUDA\n");
-        return NULL;
-    } else if (deviceCount == 1) {
-        DEBUG_LOG("There is 1 device supporting CUDA\n");
-    } else {
-        DEBUG_LOG("There are %d devices supporting CUDA, picking first...\n", deviceCount);
-    }
-
-    int devID = 0;
-
-    /* pick up device with zero ordinal (default, or devID) */
-    CUCHECK(cuDeviceGet(&cuDevice, devID));
-
-    char name[128];
-    CUCHECK(cuDeviceGetName(name, sizeof(name), devID));
-    DEBUG_LOG("[pid = %d, dev = %d] device name = [%s]\n", getpid(), cuDevice, name);
-    DEBUG_LOG("creating CUDA Contnext\n");
-
-    /* Create context */
-    error = cuCtxCreate(&cuContext, CU_CTX_MAP_HOST, cuDevice);
-    if (error != CUDA_SUCCESS) {
-        fprintf(stderr, "cuCtxCreate() error=%d\n", error);
-        return NULL;
-    }
-
-    DEBUG_LOG("making it the current CUDA Context\n");
-    error = cuCtxSetCurrent(cuContext);
-    if (error != CUDA_SUCCESS) {
-        fprintf(stderr, "cuCtxSetCurrent() error=%d\n", error);
-        return NULL;
-    }
-
-    DEBUG_LOG("cuMemAlloc() of a %zd bytes GPU buffer\n", aligned_size);
-    CUdeviceptr d_A;
-    error = cuMemAlloc(&d_A, aligned_size);
-    if (error != CUDA_SUCCESS) {
-        fprintf(stderr, "cuMemAlloc error=%d\n", error);
-        return NULL;
-    }
-    DEBUG_LOG("allocated GPU buffer address at %016llx pointer=%p\n", d_A, (void*)d_A);
-
-    return ((void*)d_A);
-}
-
-static int free_gpu(void *gpu_buff)
-{
-    CUdeviceptr d_A = (CUdeviceptr) gpu_buff;
-
-    printf("deallocating RX GPU buffer\n");
-    cuMemFree(d_A);
-    d_A = 0;
-
-    DEBUG_LOG("destroying current CUDA Context\n");
-    CUCHECK(cuCtxDestroy(cuContext));
-
-    return 0;
-}
-#endif //HAVE_CUDA
 //============================================================================================
 static struct ibv_context *open_ib_device_by_name(const char *ib_dev_name)
 {
@@ -273,7 +162,7 @@ struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port
      ****************************************************************************************************/
     rdma_dev->context = open_ib_device_by_name(ib_dev_name);
     if (!rdma_dev->context){
-        return NULL;
+        goto clean_rdma_dev;
     }
     /****************************************************************************************************/
     
@@ -353,7 +242,6 @@ struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port
     }
 
     rdma_dev->ib_port = ib_port;
-    rdma_dev->dc_key  = DC_KEY;
     rdma_dev->dctn    = rdma_dev->qp->qp_num;
     rdma_dev->gidx    = -1; /*default value (no GID)*/
 
@@ -383,6 +271,9 @@ clean_device:
     if (rdma_dev->context) {
         ibv_close_device(rdma_dev->context);
     }
+    
+clean_rdma_dev:
+    free(rdma_dev);
 
     return NULL;
 }
@@ -406,7 +297,7 @@ struct rdma_device *rdma_open_device_source(const char *ib_dev_name, int ib_port
      ****************************************************************************************************/
     rdma_dev->context = open_ib_device_by_name(ib_dev_name);
     if (!rdma_dev->context){
-        return NULL;
+        goto clean_rdma_dev;
     }
     
     DEBUG_LOG ("ibv_alloc_pd(ibv_context = %p)\n", rdma_dev->context);
@@ -517,6 +408,9 @@ clean_device:
         ibv_close_device(rdma_dev->context);
     }
 
+clean_rdma_dev:
+    free(rdma_dev);
+    
     return NULL;
 }
 
@@ -526,7 +420,8 @@ void rdma_close_device(struct rdma_device *rdma_dev)
     int ret_val;
 
     if (rdma_dev->rdma_buff_cnt > 0) {
-        fprintf(stderr, "The number of attached RDMA buffers is not zero (%d). Can't close device.\n", rdma_buff_cnt);
+        fprintf(stderr, "The number of attached RDMA buffers is not zero (%d). Can't close device.\n",
+                rdma_dev->rdma_buff_cnt);
         return;
     }
     DEBUG_LOG("ibv_destroy_qp(%p)\n", rdma_dev->qp);
@@ -600,7 +495,7 @@ int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev, int gidx)
             memset(&(rdma_dev->gid), 0, sizeof rdma_dev->gid);
         }
     } else /* gidx >= 0*/ {
-        ret_val = ibv_query_gid(rdma_dev->context, rdma_dev->ib_port, gidx, &(rdma_dev->gid))
+        ret_val = ibv_query_gid(rdma_dev->context, rdma_dev->ib_port, gidx, &(rdma_dev->gid));
         if (ret_val) {
             fprintf(stderr, "can't read GID of index %d, error code %d\n", gidx, ret_val);
             return 1;
@@ -641,7 +536,7 @@ int modify_target_qp_to_rtr(struct rdma_device *rdma_dev, enum ibv_mtu mtu)
                 IBV_QP_PATH_MTU       |
                 IBV_QP_MIN_RNR_TIMER; // for DCT
 
-    if (ibv_modify_qp(rdma_dev->qp, &attr, attr_mask)) {
+    if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
     }
@@ -670,13 +565,11 @@ int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu m
         qp_attr.ah_attr.grh.hop_limit  = 1;
         qp_attr.ah_attr.grh.sgid_index = rdma_dev->gidx;
     }
-    enum ibv_qp_attr_mask attr_mask;
+    attr_mask = IBV_QP_STATE    |
+                IBV_QP_AV       |
+                IBV_QP_PATH_MTU ;
 
-    attr_mask = IBV_QP_STATE              |
-                IBV_QP_AV                 |
-                IBV_QP_PATH_MTU           ;
-
-    if (ibv_modify_qp(rdma_dev->qp, &attr, attr_mask)) {
+    if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
     }
@@ -688,68 +581,18 @@ int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu m
     qp_attr.rnr_retry      = 7;
     //qp_attr.sq_psn         = 0;
     qp_attr.max_rd_atomic  = 1;
-    qp_attr_mask = IBV_QP_STATE            |
-                   IBV_QP_TIMEOUT          |
-                   IBV_QP_RETRY_CNT        |
-                   IBV_QP_RNR_RETRY        |
-                   IBV_QP_SQ_PSN           |
-                   IBV_QP_MAX_QP_RD_ATOMIC ;
-    if (ibv_modify_qp(rdma_dev->qp, &attr, attr_mask)) {
+    attr_mask = IBV_QP_STATE            |
+                IBV_QP_TIMEOUT          |
+                IBV_QP_RETRY_CNT        |
+                IBV_QP_RNR_RETRY        |
+                IBV_QP_SQ_PSN           |
+                IBV_QP_MAX_QP_RD_ATOMIC ;
+    if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
         fprintf(stderr, "Failed to modify QP to RTS\n");
         return 1;
     }
     
     return 0;
-}
-
-/****************************************************************************************
- * Memory allocation on CPU or GPU according to HAVE_CUDA pre-compile option and use_cuda flag
- * Return value: Allocated buffer pointer (if success), NULL (if error)
- ****************************************************************************************/
-#ifdef HAVE_CUDA
-void *work_buffer_alloc(size_t length, int use_cuda)
-#else
-void *work_buffer_alloc(size_t length)
-#endif //HAVE_CUDA
-{
-    void    *buff;
-
-#ifdef HAVE_CUDA
-    if (use_cuda) {
-        /* Mem allocation on GPU */
-        buff = init_gpu(length);
-        if (!buff) {
-            fprintf(stderr, "Couldn't allocate work buffer on GPU.\n");
-            return NULL;
-        }
-    } else
-#endif //HAVE_CUDA
-    {
-        /* Mem allocation on CPU */
-        int page_size = sysconf(_SC_PAGESIZE);
-        buff = memalign(page_size, length);
-        if (!buff) {
-            fprintf(stderr, "Couldn't allocate work buffer on CPU.\n");
-            return NULL;
-        }
-    }
-    return buff;
-}
-
-/****************************************************************************************
- * CPU or GPU memory free, according to HAVE_CUDA pre-compile option and use_cuda flag
- ****************************************************************************************/
-void work_buffer_free(void *buff, int use_cuda)
-{
-#ifdef HAVE_CUDA
-    if (use_cuda) {
-        free_gpu(buff);
-    } else
-#endif //HAVE_CUDA
-    {
-        DEBUG_LOG("free memory buffer(%p)\n", buff);
-        free(buff);
-    }
 }
 
 //============================================================================================
@@ -783,9 +626,41 @@ struct rdma_buffer *rdma_buffer_reg(struct rdma_device *rdma_dev, void *addr, si
     return rdma_buff;
 
 clean_rdma_buff:
-    if (rdma_dev->qp) {
-        ibv_destroy_qp(rdma_dev->qp);
+    /* We don't decrement device rdma_buff_cnt because we still did not increment it,
+    we just free the allocated for rdma_buff memory. */
+    free(rdma_buff);
+    
+    return NULL;
+}
+
+//============================================================================================
+struct rdma_buffer *rdma_local_buffer_reg(struct rdma_device *rdma_dev, void *addr, size_t length)
+{
+    struct rdma_buffer *rdma_buff;
+    int    ret_val;
+
+    rdma_buff = calloc(1, sizeof *rdma_buff);
+    if (!rdma_buff) {
+        fprintf(stderr, "rdma_buff memory allocation failed\n");
+        return NULL;
     }
+
+    enum ibv_access_flags   access_flags =  IBV_ACCESS_LOCAL_WRITE;
+    rdma_buff->mr = ibv_reg_mr(rdma_dev->pd, addr, length, access_flags);
+    if (!rdma_buff->mr) {
+        fprintf(stderr, "Couldn't register GPU MR\n");
+        goto clean_rdma_buff;
+    }
+    DEBUG_LOG("ibv_reg_mr completed: buf %p, size = %lu, rkey = 0x%08x\n",
+               addr, length, rdma_buff->mr->rkey);
+
+    rdma_buff->buf_addr = addr;
+    rdma_buff->buf_size = length;
+    /* we are not going to use mr->rkey, because we have only local access to the buffer*/
+    rdma_buff->rdma_dev = rdma_dev;
+    rdma_dev->rdma_buff_cnt++;
+
+    return rdma_buff;
 
 clean_rdma_buff:
     /* We don't decrement device rdma_buff_cnt because we still did not increment it,
@@ -805,7 +680,7 @@ void rdma_buffer_dereg(struct rdma_buffer *rdma_buff)
         ret_val = ibv_dereg_mr(rdma_buff->mr);
         if (ret_val) {
             fprintf(stderr, "Couldn't deregister MR, error %d\n", ret_val);
-            return 1;
+            return;
         }
     }
     rdma_buff->rdma_dev->rdma_buff_cnt--;
@@ -816,7 +691,7 @@ void rdma_buffer_dereg(struct rdma_buffer *rdma_buff)
 }
 
 //============================================================================================
-void wire_gid_to_gid(const char *wgid, union ibv_gid *gid)
+static void wire_gid_to_gid(const char *wgid, union ibv_gid *gid)
 {
     char tmp[9];
     uint32_t v32;
@@ -830,55 +705,43 @@ void wire_gid_to_gid(const char *wgid, union ibv_gid *gid)
     }
 }
 
-void gid_to_wire_gid(const union ibv_gid *gid, char wgid[])
+static void gid_to_wire_gid(const union ibv_gid *gid, char wgid[])
 {
     int i;
     uint32_t *raw = (uint32_t *)gid->raw;
 
     for (i = 0; i < 4; ++i)
-        sprintf(&wgid[i * 8], "%08x",
-            htonl(raw[i]));
+        sprintf(&wgid[i * 8], "%08x", htonl(raw[i]));
 }
 
 //============================================================================================
+    /*                                   addr             size     rkey     lid  dctn   g gid*/
+#define BUFF_DESC_STRING_LENGTH (sizeof "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10")
+
 int rdma_buffer_get_desc_str(struct rdma_buffer *rdma_buff, char *desc_str, size_t desc_length)
 {
-    /*                        addr             size     rkey*/
-    if (desc_length < sizeof "0102030405060708:01020304:01020304") {
-        printf(stderr, "desc string size (%u) is less than required (%u) for sending rdma_buffer attributes\n",
-               descr_length, sizeof "0102030405060708:01020304:01020304");
-        return 1;
+    if (desc_length < BUFF_DESC_STRING_LENGTH) {
+        fprintf(stderr, "desc string size (%u) is less than required (%u) for sending rdma_buffer attributes\n",
+                desc_length, BUFF_DESC_STRING_LENGTH);
+        return 0;
     }
-
-    sprintf(desc_str, "%016llx:%08lx:%08x",
+    /*       addr             size     rkey     lid  dctn   g 
+            "0102030405060708:01020304:01020304:0102:010203:1:" */
+    sprintf(desc_str, "%016llx:%08lx:%08x:%04x:%06x:%d:",
             (unsigned long long)rdma_buff->buf_addr,
             (unsigned long)rdma_buff->buf_size,
-            rdma_buff->rkey);
-    return 0;
+            rdma_buff->rkey,
+            rdma_buff->rdma_dev->lid,
+            rdma_buff->rdma_dev->dctn,
+            rdma_buff->rdma_dev->is_global & 0x1);
+    
+    gid_to_wire_gid(&rdma_buff->rdma_dev->gid, desc_str + sizeof "0102030405060708:01020304:01020304:0102:010203:1");
+    
+    return (strlen(desc_str) + 1)/*including the terminating null character*/;
 }
 
 //============================================================================================
-int rdma_device_get_desc_str(struct rdma_device *rdma_dev, char *desc_str, size_t desc_length)
-{
-    /*                        lid  dctn   dc_key           g gid*/
-    if (desc_length < sizeof "0102:010203:0102030405060708:1:0102030405060708090a0b0c0d0e0f10") {
-        printf(stderr, "desc string size (%u) is less than required (%u) for sending rdma_device attributes\n",
-               descr_length, sizeof "0102:010203:0102030405060708:1:0102030405060708090a0b0c0d0e0f10");
-        return 1;
-    }
-    sprintf(desc_str, "%04x:%06x:%016llx:%d:",
-            rdma_dev->lid,
-            rdma_dev->dctn,
-            (unsigned long long)rdma_dev->dc_key,
-            rdma_dev->is_global & 0x1);
-
-    gid_to_wire_gid(&rdma_dev->gid, desc_str + sizeof "0102:010203:0102030405060708:1")
-
-    return 0;
-}
-
-//============================================================================================
-int rdma_write_to_peer(struct rdma_device *rdma_dev, struct rdma_write_attr *attr)
+int rdma_write_to_peer(struct rdma_write_attr *attr)
 {
     unsigned long long  rem_buf_addr = 0;
     unsigned long       rem_buf_size = 0;
@@ -887,34 +750,32 @@ int rdma_write_to_peer(struct rdma_device *rdma_dev, struct rdma_write_attr *att
     unsigned long       rem_dctn = 0; // QP number from DCT (client)
     int                 is_global = 0;
     union ibv_gid       rem_gid;
-    uint64_t            rem_dc_key = 0;
+    struct rdma_device *rdma_dev = attr->local_buf_rdma->rdma_dev;
 
-    /* 1st small RDMA Write for DCI connect, this will create cqe->ts_start */
-    DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_start: qpex = %p\n", rdma_dev->qpex);
+    /* RDMA Write for DCI connect, this will create cqe->ts_start */
+    DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_start: qpex = %p\n", rdma_dev->qpex);
     ibv_wr_start(rdma_dev->qpex);
-    rdma_dev->qpex->wr_id = attr->wr_id | (1<<63);
+    rdma_dev->qpex->wr_id = attr->wr_id;
     rdma_dev->qpex->wr_flags = IBV_SEND_SIGNALED;
 
-    /*   addr             size     rkey
-        "0102030405060708:01020304:01020304"*/
-    sscanf(attr->remote_buf_desc_str, "%llx:%lx:%lx", &rem_buf_addr, &rem_buf_size, &rem_buf_rkey);
+    /*   addr             size     rkey     lid  dctn   g gid
+        "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10"*/
+    sscanf(attr->remote_buf_desc_str, "%llx:%lx:%lx:%x:%x:%d",
+           &rem_buf_addr, &rem_buf_size, &rem_buf_rkey, &rem_lid, &rem_dctn, &is_global);
 
-    DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
-                        attr->qpex, rem_buf_rkey, (unsigned long long)rem_buf_addr);
-    ibv_wr_rdma_write(rdma_dev->qpex, rem_buf_rkey, rem_buf_addr);
-
-    /*   lid  dctn   dc_key           g gid
-        "0102:010203:0102030405060708:1:0102030405060708090a0b0c0d0e0f10"*/
-    sscanf(attr->remote_dev_desc_str, "%x:%x:%llx:%d", &rem_lid, &rem_dctn, &rem_dc_key, &is_global);
     memset(&rem_gid, 0, sizeof rem_gid);
     if (is_global) {
-        wire_gid_to_gid(attr->remote_dev_desc_str + sizeof "0102:010203:0102030405060708:1", &rem_gid);
+        wire_gid_to_gid(attr->remote_buf_desc_str + sizeof "0102030405060708:01020304:01020304:0102:010203:1", &rem_gid);
     }
     DEBUG_LOG_FAST_PATH ("Rem GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
                          rem_gid.raw[0],  rem_gid.raw[1],  rem_gid.raw[2],  rem_gid.raw[3],
                          rem_gid.raw[4],  rem_gid.raw[5],  rem_gid.raw[6],  rem_gid.raw[7], 
                          rem_gid.raw[8],  rem_gid.raw[9],  rem_gid.raw[10], rem_gid.raw[11],
                          rem_gid.raw[12], rem_gid.raw[13], rem_gid.raw[14], rem_gid.raw[15] );
+
+    DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
+                        rdma_dev->qpex, rem_buf_rkey, (unsigned long long)rem_buf_addr);
+    ibv_wr_rdma_write(rdma_dev->qpex, rem_buf_rkey, rem_buf_addr);
 
     /* Check if address handler (ah) is present in the hash, if not, create ah */
     // TODO...
@@ -937,23 +798,25 @@ int rdma_write_to_peer(struct rdma_device *rdma_dev, struct rdma_write_attr *att
         return 1;
     }
     
-    DEBUG_LOG_FAST_PATH("1st small RDMA Write: mlx5dv_wr_set_dc_addr: mqpex = %p, ah = %p, rem_dctn = 0x%06x, rem_dc_key = %llx\n",
-                        rdma_dev->mqpex, ah, rem_dctn, rem_dc_key);
-    mlx5dv_wr_set_dc_addr(rdma_dev->mqpex, ah, rem_dctn, rem_dc_key);
+    DEBUG_LOG_FAST_PATH("RDMA Write: mlx5dv_wr_set_dc_addr: mqpex = %p, ah = %p, rem_dctn = 0x%06x\n",
+                        rdma_dev->mqpex, ah, rem_dctn);
+    mlx5dv_wr_set_dc_addr(rdma_dev->mqpex, ah, rem_dctn, DC_KEY);
     
-    DEBUG_LOG_FAST_PATH("1st small RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
+    DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
                         rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (unsigned long long)attr->local_buf_rdma->buf_addr, 1);
-    ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (uintptr_t)attr->local_buf_rdma->buf_addr, 1);
+    if (rem_buf_size > attr->local_buf_rdma->buf_size) {
+        DEBUG_LOG_FAST_PATH("Remote buffer size %u is greater than local %u, changing the send size to the local size\n",
+                            rem_buf_size, attr->local_buf_rdma->buf_size);
+        rem_buf_size = attr->local_buf_rdma->buf_size;
+    }
+    ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (uintptr_t)attr->local_buf_rdma->buf_addr, (uint32_t)rem_buf_size);
 
-    /* 2nd SIZE x RDMA Write, this will create cqe->ts_end */
-    rdma_dev->qpex->wr_id = attr->wr_id;
-    DEBUG_LOG_FAST_PATH("2nd SIZE x RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
-                        rdma_dev->qpex, rem_buf_rkey, (unsigned long long)rem_buf_addr);
-    ibv_wr_rdma_write(rdma_dev->qpex, rem_buf_rkey, rem_buf_addr);
-    mlx5dv_wr_set_dc_addr(rdma_dev->mqpex, ah, rem_dctn, rem_dc_key);
-    DEBUG_LOG_FAST_PATH("2nd SIZE x RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
-                        rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (unsigned long long)attr->local_buf_rdma->buf_addr, attr->local_buf_rdma->buf_size);
-    ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (uintptr_t)attr->local_buf_rdma->buf_addr, (uint32_t)attr->local_buf_rdma->buf_size);
+    //TODO - in the current implementation when we are not using hash, we need to free ah
+    int ret_val = ibv_destroy_ah(ah);
+    if (ret_val) {
+        perror("ibv_destroy_ah");
+        return 1;
+    }
 
     /* ring DB */
     DEBUG_LOG_FAST_PATH("ibv_wr_complete: qpex = %p\n", rdma_dev->qpex);
@@ -979,19 +842,21 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
     }
 
     // Polling completion queue
-    DEBUG_LOG_FAST_PATH("Polling completion queue\n");
-    do {
-        DEBUG_LOG_FAST_PATH("Before ibv_poll_cq\n");
-        reported_entries = ibv_poll_cq(rdma_dev->cq, 2, wc);
-        if (reported_entries < 0) {
-            fprintf(stderr, "poll CQ failed %d\n", reported_entries);
-            return 0;
-        }
-    } while (reported_entries < 1);
+    DEBUG_LOG_FAST_PATH("Polling completion queue one time: ibv_poll_cq\n");
+    //DEBUG_LOG_FAST_PATH("Polling completion queue\n");
+//    do {
+    DEBUG_LOG_FAST_PATH("Before ibv_poll_cq\n");
+    reported_entries = ibv_poll_cq(rdma_dev->cq, num_entries, wc);
+    if (reported_entries < 0) {
+        fprintf(stderr, "poll CQ failed %d\n", reported_entries);
+        return 0;
+    }
+//    } while (reported_entries < 1);
 
     for (i = 0; i < reported_entries; ++i) {
         event[i].wr_id  = wc[i].wr_id;
         event[i].status = wc[i].status; // or (wc[i].status == IBV_WC_SUCCESS)? RDMA_STATUS_SUCCESS: RDMA_STATUS_ERR_LAST
     }
+    return reported_entries;
 }
 
