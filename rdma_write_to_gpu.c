@@ -75,9 +75,6 @@ struct rdma_device {
     int                 ib_port;
     int                 rdma_buff_cnt;
     
-    /* QP related fields for DCT (client) side, DCI (server) side receives these from socket */
-    uint32_t            dctn; /*QP num*/
-
     /* Address handler (port info) relateed fields */
     int                 is_global;
     int                 gidx;
@@ -226,7 +223,7 @@ struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port
     DEBUG_LOG ("mlx5dv_create_qp %p completed: qp_num = %u\n", rdma_dev->qp, rdma_dev->qp->qp_num);
 
     /* - - - - - - -  Modify QP to INIT  - - - - - - - */
-    struct ibv_qp_attr attr = {
+    struct ibv_qp_attr qp_attr = {
         .qp_state        = IBV_QPS_INIT,
         .pkey_index      = 0,
         .port_num        = ib_port,
@@ -236,16 +233,16 @@ struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port
                                       IBV_QP_PKEY_INDEX |
                                       IBV_QP_PORT       |
                                       IBV_QP_ACCESS_FLAGS;
-    DEBUG_LOG("ibv_modify_qp(qp = %p, attr.qp_state = %d, attr_mask = 0x%x)\n",
-               rdma_dev->qp, attr.qp_state, attr_mask);
-    ret_val = ibv_modify_qp(rdma_dev->qp, &attr, attr_mask);
+    DEBUG_LOG ("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, qp_attr.qp_state, attr_mask);
+    ret_val = ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask);
     if (ret_val) {
         fprintf(stderr, "Failed to modify QP to INIT, error %d\n", ret_val);
         goto clean_qp;
     }
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
     rdma_dev->ib_port = ib_port;
-    rdma_dev->dctn    = rdma_dev->qp->qp_num;
     rdma_dev->gidx    = -1; /*default value (no GID)*/
 
     return rdma_dev;
@@ -353,6 +350,7 @@ struct rdma_device *rdma_open_device_source(const char *ib_dev_name, int ib_port
     
     DEBUG_LOG ("mlx5dv_create_qp(%p,%p,%p)\n", rdma_dev->context, &attr_ex, &attr_dv);
     rdma_dev->qp = mlx5dv_create_qp(rdma_dev->context, &attr_ex, &attr_dv);
+    DEBUG_LOG ("mlx5dv_create_qp %p completed: qp_num = %u\n", rdma_dev->qp, rdma_dev->qp->qp_num);
 
     if (!rdma_dev->qp)  {
         fprintf(stderr, "Couldn't create QP\n");
@@ -370,7 +368,7 @@ struct rdma_device *rdma_open_device_source(const char *ib_dev_name, int ib_port
     }
 
     /* - - - - - - -  Modify QP to INIT  - - - - - - - */
-    struct ibv_qp_attr attr = {
+    struct ibv_qp_attr qp_attr = {
         .qp_state        = IBV_QPS_INIT,
         .pkey_index      = 0,
         .port_num        = ib_port,
@@ -380,13 +378,14 @@ struct rdma_device *rdma_open_device_source(const char *ib_dev_name, int ib_port
                                       IBV_QP_PKEY_INDEX |
                                       IBV_QP_PORT       |
                                       0 /*IBV_QP_ACCESS_FLAGS*/; /*we must zero this bit for DCI QP*/
-    DEBUG_LOG("ibv_modify_qp(qp = %p, attr.qp_state = %d, attr_mask = 0x%x)\n",
-               rdma_dev->qp, attr.qp_state, attr_mask);
-    ret_val = ibv_modify_qp(rdma_dev->qp, &attr, attr_mask);
+    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, qp_attr.qp_state, attr_mask);
+    ret_val = ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask);
     if (ret_val) {
         fprintf(stderr, "Failed to modify QP to INIT, error %d\n", ret_val);
         goto clean_qp;
     }
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
     rdma_dev->ib_port = ib_port;
     rdma_dev->gidx    = -1; /*default value (no GID)*/
@@ -547,6 +546,7 @@ int modify_target_qp_to_rtr(struct rdma_device *rdma_dev, enum ibv_mtu mtu)
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
     }
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
     return 0;
 }
@@ -582,6 +582,7 @@ int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu m
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
     }
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
     /* - - - - - - -  Modify QP to RTS  - - - - - - - */
     qp_attr.qp_state       = IBV_QPS_RTS;
@@ -602,6 +603,7 @@ int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu m
         fprintf(stderr, "Failed to modify QP to RTS\n");
         return 1;
     }
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
     
     return 0;
 }
@@ -743,7 +745,7 @@ int rdma_buffer_get_desc_str(struct rdma_buffer *rdma_buff, char *desc_str, size
             (unsigned long)rdma_buff->buf_size,
             rdma_buff->rkey,
             rdma_buff->rdma_dev->lid,
-            rdma_buff->rdma_dev->dctn,
+            rdma_buff->rdma_dev->qp->qp_num /* dctn */,
             rdma_buff->rdma_dev->is_global & 0x1);
     
     gid_to_wire_gid(&rdma_buff->rdma_dev->gid, desc_str + sizeof "0102030405060708:01020304:01020304:0102:010203:1");
@@ -752,6 +754,7 @@ int rdma_buffer_get_desc_str(struct rdma_buffer *rdma_buff, char *desc_str, size
 }
 
 //============================================================================================
+static struct ibv_ah    *ah = NULL;
 int rdma_write_to_peer(struct rdma_write_attr *attr)
 {
     unsigned long long  rem_buf_addr = 0;
@@ -791,7 +794,7 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     /* Check if address handler (ah) is present in the hash, if not, create ah */
     // TODO...
     struct ibv_ah_attr  ah_attr;
-    struct ibv_ah       *ah;
+    //struct ibv_ah       *ah;
     
     memset(&ah_attr, 0, sizeof ah_attr);
     ah_attr.is_global   = is_global;
@@ -803,10 +806,12 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
         ah_attr.grh.dgid = rem_gid;
         ah_attr.grh.sgid_index = rdma_dev->gidx;
     }
-    ah = ibv_create_ah(rdma_dev->pd, &ah_attr);
     if (!ah) {
-        perror("ibv_create_ah");
-        return 1;
+        ah = ibv_create_ah(rdma_dev->pd, &ah_attr);
+        if (!ah) {
+            perror("ibv_create_ah");
+            return 1;
+        }
     }
     
     DEBUG_LOG_FAST_PATH("RDMA Write: mlx5dv_wr_set_dc_addr: mqpex = %p, ah = %p, rem_dctn = 0x%06x\n",
@@ -866,6 +871,15 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
     for (i = 0; i < reported_entries; ++i) {
         event[i].wr_id  = wc[i].wr_id;
         event[i].status = wc[i].status; // or (wc[i].status == IBV_WC_SUCCESS)? RDMA_STATUS_SUCCESS: RDMA_STATUS_ERR_LAST
+    }
+    //MB - TODO
+    if (ah){
+        int ret_val = ibv_destroy_ah(ah);
+        if (ret_val) {
+            perror("ibv_destroy_ah");
+            return 1;
+        }
+        ah = NULL;
     }
     return reported_entries;
 }
