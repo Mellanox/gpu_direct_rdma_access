@@ -223,6 +223,7 @@ struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port
         fprintf(stderr, "Couldn't create QP\n");
         goto clean_srq;
     }
+    DEBUG_LOG ("mlx5dv_create_qp %p completed: qp_num = %u\n", rdma_dev->qp, rdma_dev->qp->qp_num);
 
     /* - - - - - - -  Modify QP to INIT  - - - - - - - */
     struct ibv_qp_attr attr = {
