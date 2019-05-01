@@ -335,17 +335,16 @@ int main(int argc, char *argv[])
         ret_size = rdma_buffer_get_desc_str(rdma_buff, desc_str, sizeof desc_str);
         if (!ret_size) {
             ret_val = 1;
-            goto clean_mem_buff;
+            goto clean_rdma_buff;
         }
         
-        DEBUG_LOG_FAST_PATH("Send message N %d: buffer desc \"%s\", device desc \"%s\"\n",
-                            cnt, desc_str, desc_str + sizeof "0102030405060708:01020304:01020304");
+        DEBUG_LOG_FAST_PATH("Send message N %d: buffer desc \"%s\"\n", cnt, desc_str);
         ret_size = write(sockfd, desc_str, sizeof desc_str);
         if (ret_size != sizeof desc_str) {
             perror("client write");
             fprintf(stderr, "Couldn't send RDMA data for iteration, write data size %d\n", ret_size);
             ret_val = 1;
-            goto clean_mem_buff;
+            goto clean_rdma_buff;
         }
         
         // Wating for confirmation message from the socket that rdma_write from the server has beed completed
@@ -354,7 +353,7 @@ int main(int argc, char *argv[])
             perror("client read");
             fprintf(stderr, "Couldn't read \"rdma_write completed\" message, recv data size %d\n", ret_size);
             ret_val = 1;
-            goto clean_mem_buff;
+            goto clean_rdma_buff;
         }
 
         // Printing received data for debug purpose
@@ -371,8 +370,11 @@ int main(int argc, char *argv[])
 
     ret_val = print_run_time(start, usr_par.size, usr_par.iters);
     if (ret_val) {
-        goto clean_mem_buff;
+        goto clean_rdma_buff;
     }
+
+clean_rdma_buff:
+    rdma_buffer_dereg(rdma_buff);
 
 clean_mem_buff:
  #ifdef HAVE_CUDA

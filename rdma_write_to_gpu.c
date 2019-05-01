@@ -235,6 +235,8 @@ struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port
                                       IBV_QP_PKEY_INDEX |
                                       IBV_QP_PORT       |
                                       IBV_QP_ACCESS_FLAGS;
+    DEBUG_LOG("ibv_modify_qp(qp = %p, attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, attr.qp_state, attr_mask);
     ret_val = ibv_modify_qp(rdma_dev->qp, &attr, attr_mask);
     if (ret_val) {
         fprintf(stderr, "Failed to modify QP to INIT, error %d\n", ret_val);
@@ -377,6 +379,8 @@ struct rdma_device *rdma_open_device_source(const char *ib_dev_name, int ib_port
                                       IBV_QP_PKEY_INDEX |
                                       IBV_QP_PORT       |
                                       0 /*IBV_QP_ACCESS_FLAGS*/; /*we must zero this bit for DCI QP*/
+    DEBUG_LOG("ibv_modify_qp(qp = %p, attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, attr.qp_state, attr_mask);
     ret_val = ibv_modify_qp(rdma_dev->qp, &attr, attr_mask);
     if (ret_val) {
         fprintf(stderr, "Failed to modify QP to INIT, error %d\n", ret_val);
@@ -536,6 +540,8 @@ int modify_target_qp_to_rtr(struct rdma_device *rdma_dev, enum ibv_mtu mtu)
                 IBV_QP_PATH_MTU       |
                 IBV_QP_MIN_RNR_TIMER; // for DCT
 
+    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, qp_attr.qp_state, attr_mask);
     if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
@@ -569,6 +575,8 @@ int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu m
                 IBV_QP_AV       |
                 IBV_QP_PATH_MTU ;
 
+    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, qp_attr.qp_state, attr_mask);
     if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
@@ -587,6 +595,8 @@ int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu m
                 IBV_QP_RNR_RETRY        |
                 IBV_QP_SQ_PSN           |
                 IBV_QP_MAX_QP_RD_ATOMIC ;
+    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, qp_attr.qp_state, attr_mask);
     if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
         fprintf(stderr, "Failed to modify QP to RTS\n");
         return 1;
@@ -812,11 +822,11 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (uintptr_t)attr->local_buf_rdma->buf_addr, (uint32_t)rem_buf_size);
 
     //TODO - in the current implementation when we are not using hash, we need to free ah
-    int ret_val = ibv_destroy_ah(ah);
-    if (ret_val) {
-        perror("ibv_destroy_ah");
-        return 1;
-    }
+    //int ret_val = ibv_destroy_ah(ah);
+    //if (ret_val) {
+    //    perror("ibv_destroy_ah");
+    //    return 1;
+    //}
 
     /* ring DB */
     DEBUG_LOG_FAST_PATH("ibv_wr_complete: qpex = %p\n", rdma_dev->qpex);
@@ -842,10 +852,9 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
     }
 
     // Polling completion queue
-    DEBUG_LOG_FAST_PATH("Polling completion queue one time: ibv_poll_cq\n");
-    //DEBUG_LOG_FAST_PATH("Polling completion queue\n");
 //    do {
-    DEBUG_LOG_FAST_PATH("Before ibv_poll_cq\n");
+    debug_fast_path = 0; //MB - debug
+    DEBUG_LOG_FAST_PATH("Polling completion queue: ibv_poll_cq\n");
     reported_entries = ibv_poll_cq(rdma_dev->cq, num_entries, wc);
     if (reported_entries < 0) {
         fprintf(stderr, "poll CQ failed %d\n", reported_entries);
