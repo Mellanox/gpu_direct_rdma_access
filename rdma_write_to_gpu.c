@@ -140,8 +140,145 @@ clean_device_list:
     return context;
 }
 
+/****************************************************************************************
+ * Fill portinfo structure, get lid and gid from portinfo
+ * Return value: 0 - success, 1 - error
+ ****************************************************************************************/
+static int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev)
+{
+    struct ibv_port_attr    portinfo;
+    int    ret_val;
+
+    ret_val = ibv_query_port(rdma_dev->context, rdma_dev->ib_port, &portinfo);
+    if (ret_val) {
+        fprintf(stderr, "Couldn't get port info\n");
+        return 1;
+    }
+
+    rdma_dev->lid = portinfo.lid;
+    if ((portinfo.link_layer != IBV_LINK_LAYER_ETHERNET) && (!portinfo.lid)) {
+        fprintf(stderr, "Couldn't get local LID\n");
+        return 1;
+    }
+    
+    if (rdma_dev->gidx < 0) {
+        if (portinfo.link_layer == IBV_LINK_LAYER_ETHERNET) {
+            fprintf(stderr, "Wrong GID index (%d) for ETHERNET port\n", rdma_dev->gidx);
+            return 1;
+        } else {
+            memset(&(rdma_dev->gid), 0, sizeof rdma_dev->gid);
+        }
+    } else /* rdma_dev->gidx >= 0*/ {
+        ret_val = ibv_query_gid(rdma_dev->context, rdma_dev->ib_port, rdma_dev->gidx, &(rdma_dev->gid));
+        if (ret_val) {
+            fprintf(stderr, "can't read GID of index %d, error code %d\n", rdma_dev->gidx, ret_val);
+            return 1;
+        }
+        DEBUG_LOG ("My GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
+                   rdma_dev->gid.raw[0], rdma_dev->gid.raw[1], rdma_dev->gid.raw[2], rdma_dev->gid.raw[3],
+                   rdma_dev->gid.raw[4], rdma_dev->gid.raw[5], rdma_dev->gid.raw[6], rdma_dev->gid.raw[7], 
+                   rdma_dev->gid.raw[8], rdma_dev->gid.raw[9], rdma_dev->gid.raw[10], rdma_dev->gid.raw[11],
+                   rdma_dev->gid.raw[12], rdma_dev->gid.raw[13], rdma_dev->gid.raw[14], rdma_dev->gid.raw[15] );
+    }
+    rdma_dev->is_global = (rdma_dev->gid.global.interface_id != 0);
+    return 0;
+}
+
+/****************************************************************************************
+ * Modify target QP state to RTR (on the client side)
+ * Return value: 0 - success, 1 - error
+ ****************************************************************************************/
+static int modify_target_qp_to_rtr(struct rdma_device *rdma_dev, enum ibv_mtu mtu)
+{
+    struct ibv_qp_attr      qp_attr;
+    enum ibv_qp_attr_mask   attr_mask;
+
+    memset(&qp_attr, 0, sizeof qp_attr);
+    qp_attr.qp_state       = IBV_QPS_RTR;
+    qp_attr.path_mtu       = mtu;
+    qp_attr.min_rnr_timer  = 16;
+    qp_attr.ah_attr.port_num    = rdma_dev->ib_port;
+
+    if (rdma_dev->gid.global.interface_id) {
+        qp_attr.ah_attr.is_global = 1;
+        qp_attr.ah_attr.grh.hop_limit  = 1;
+        qp_attr.ah_attr.grh.sgid_index = rdma_dev->gidx;
+    }
+    attr_mask = IBV_QP_STATE          |
+                IBV_QP_AV             |
+                IBV_QP_PATH_MTU       |
+                IBV_QP_MIN_RNR_TIMER; // for DCT
+
+    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, qp_attr.qp_state, attr_mask);
+    if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
+        fprintf(stderr, "Failed to modify QP to RTR\n");
+        return 1;
+    }
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
+
+    return 0;
+}
+
+/****************************************************************************************
+ * Modify source QP state to RTR and then to RTS (on the server side)
+ * Return value: 0 - success, 1 - error
+ ****************************************************************************************/
+static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu mtu)
+{
+    struct ibv_qp_attr      qp_attr;
+    enum ibv_qp_attr_mask   attr_mask;
+
+    memset(&qp_attr, 0, sizeof qp_attr);
+    
+    /* - - - - - - -  Modify QP to RTR  - - - - - - - */
+    qp_attr.qp_state = IBV_QPS_RTR;
+    qp_attr.path_mtu = mtu;
+    qp_attr.ah_attr.port_num = rdma_dev->ib_port;
+
+    if (rdma_dev->gid.global.interface_id) {
+        qp_attr.ah_attr.is_global = 1;
+        qp_attr.ah_attr.grh.hop_limit  = 1;
+        qp_attr.ah_attr.grh.sgid_index = rdma_dev->gidx;
+    }
+    attr_mask = IBV_QP_STATE    |
+                IBV_QP_AV       |
+                IBV_QP_PATH_MTU ;
+
+    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, qp_attr.qp_state, attr_mask);
+    if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
+        fprintf(stderr, "Failed to modify QP to RTR\n");
+        return 1;
+    }
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
+
+    /* - - - - - - -  Modify QP to RTS  - - - - - - - */
+    qp_attr.qp_state       = IBV_QPS_RTS;
+    qp_attr.timeout        = 16;
+    qp_attr.retry_cnt      = 7;
+    qp_attr.rnr_retry      = 7;
+    //qp_attr.sq_psn         = 0;
+    qp_attr.max_rd_atomic  = 1;
+    attr_mask = IBV_QP_STATE            |
+                IBV_QP_TIMEOUT          |
+                IBV_QP_RETRY_CNT        |
+                IBV_QP_RNR_RETRY        |
+                IBV_QP_SQ_PSN           |
+                IBV_QP_MAX_QP_RD_ATOMIC ;
+    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, qp_attr.qp_state, attr_mask);
+    if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
+        fprintf(stderr, "Failed to modify QP to RTS\n");
+        return 1;
+    }
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
+    
+    return 0;
+}
+
 //============================================================================================
-struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port) /* client */
+struct rdma_device *rdma_open_device_target(struct rdma_open_dev_attr *open_dev_attr) /* client */
 {
     struct rdma_device *rdma_dev;
     int                 ret_val;
@@ -157,7 +294,7 @@ struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port
      * if yes, we open device by the given name and return pointer to the ib context
      * The result of this function is ig_dev - initialized pointer to the relevant struct ibv_device
      ****************************************************************************************************/
-    rdma_dev->context = open_ib_device_by_name(ib_dev_name);
+    rdma_dev->context = open_ib_device_by_name(open_dev_attr->ib_devname);
     if (!rdma_dev->context){
         goto clean_rdma_dev;
     }
@@ -226,7 +363,7 @@ struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port
     struct ibv_qp_attr qp_attr = {
         .qp_state        = IBV_QPS_INIT,
         .pkey_index      = 0,
-        .port_num        = ib_port,
+        .port_num        = open_dev_attr->ib_port,
         .qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE
     };
     enum ibv_qp_attr_mask attr_mask = IBV_QP_STATE      |
@@ -242,8 +379,20 @@ struct rdma_device *rdma_open_device_target(const char *ib_dev_name, int ib_port
     }
     DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
-    rdma_dev->ib_port = ib_port;
-    rdma_dev->gidx    = -1; /*default value (no GID)*/
+    rdma_dev->ib_port = open_dev_attr->ib_port;
+    rdma_dev->gidx    = open_dev_attr->gidx;
+    /* we should init these 2 attributes before the next 2 funtions call*/
+    
+    ret_val = rdma_set_lid_gid_from_port_info(rdma_dev);
+    if (ret_val) {
+        goto clean_qp;
+    }
+
+    ret_val = modify_target_qp_to_rtr(rdma_dev, open_dev_attr->mtu);
+    if (ret_val) {
+        goto clean_qp;
+    }
+    
 
     return rdma_dev;
 
@@ -279,7 +428,7 @@ clean_rdma_dev:
 }
 
 //============================================================================================
-struct rdma_device *rdma_open_device_source(const char *ib_dev_name, int ib_port) /* server */
+struct rdma_device *rdma_open_device_source(struct rdma_open_dev_attr *open_dev_attr) /* server */
 {
     struct rdma_device *rdma_dev;
     int                 ret_val;
@@ -295,7 +444,7 @@ struct rdma_device *rdma_open_device_source(const char *ib_dev_name, int ib_port
      * if yes, we open device by the given name and return pointer to the ib context
      * The result of this function is ig_dev - initialized pointer to the relevant struct ibv_device
      ****************************************************************************************************/
-    rdma_dev->context = open_ib_device_by_name(ib_dev_name);
+    rdma_dev->context = open_ib_device_by_name(open_dev_attr->ib_devname);
     if (!rdma_dev->context){
         goto clean_rdma_dev;
     }
@@ -371,7 +520,7 @@ struct rdma_device *rdma_open_device_source(const char *ib_dev_name, int ib_port
     struct ibv_qp_attr qp_attr = {
         .qp_state        = IBV_QPS_INIT,
         .pkey_index      = 0,
-        .port_num        = ib_port,
+        .port_num        = open_dev_attr->ib_port,
         .qp_access_flags = IBV_ACCESS_LOCAL_WRITE
     };
     enum ibv_qp_attr_mask attr_mask = IBV_QP_STATE      |
@@ -387,9 +536,20 @@ struct rdma_device *rdma_open_device_source(const char *ib_dev_name, int ib_port
     }
     DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
-    rdma_dev->ib_port = ib_port;
-    rdma_dev->gidx    = -1; /*default value (no GID)*/
+    rdma_dev->ib_port = open_dev_attr->ib_port;
+    rdma_dev->gidx    = open_dev_attr->gidx;
+    /* we should init these 2 attributes before the next 2 funtions call*/
+    
+    ret_val = rdma_set_lid_gid_from_port_info(rdma_dev);
+    if (ret_val) {
+        goto clean_qp;
+    }
 
+    ret_val = modify_source_qp_to_rtr_and_rts(rdma_dev, open_dev_attr->mtu);
+    if (ret_val) {
+        goto clean_qp;
+    }
+    
     return rdma_dev;
 
 clean_qp:
@@ -470,144 +630,6 @@ void rdma_close_device(struct rdma_device *rdma_dev)
     return;
 }
 
-/****************************************************************************************
- * Fill portinfo structure, get lid and gid from portinfo
- * Return value: 0 - success, 1 - error
- ****************************************************************************************/
-int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev, int gidx)
-{
-    struct ibv_port_attr    portinfo;
-    int    ret_val;
-
-    ret_val = ibv_query_port(rdma_dev->context, rdma_dev->ib_port, &portinfo);
-    if (ret_val) {
-        fprintf(stderr, "Couldn't get port info\n");
-        return 1;
-    }
-
-    rdma_dev->lid = portinfo.lid;
-    if ((portinfo.link_layer != IBV_LINK_LAYER_ETHERNET) && (!portinfo.lid)) {
-        fprintf(stderr, "Couldn't get local LID\n");
-        return 1;
-    }
-    
-    if (gidx < 0) {
-        if (portinfo.link_layer == IBV_LINK_LAYER_ETHERNET) {
-            fprintf(stderr, "Wrong GID index (%d) for ETHERNET port\n", gidx);
-            return 1;
-        } else {
-            memset(&(rdma_dev->gid), 0, sizeof rdma_dev->gid);
-        }
-    } else /* gidx >= 0*/ {
-        ret_val = ibv_query_gid(rdma_dev->context, rdma_dev->ib_port, gidx, &(rdma_dev->gid));
-        if (ret_val) {
-            fprintf(stderr, "can't read GID of index %d, error code %d\n", gidx, ret_val);
-            return 1;
-        }
-        DEBUG_LOG ("My GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
-                   rdma_dev->gid.raw[0], rdma_dev->gid.raw[1], rdma_dev->gid.raw[2], rdma_dev->gid.raw[3],
-                   rdma_dev->gid.raw[4], rdma_dev->gid.raw[5], rdma_dev->gid.raw[6], rdma_dev->gid.raw[7], 
-                   rdma_dev->gid.raw[8], rdma_dev->gid.raw[9], rdma_dev->gid.raw[10], rdma_dev->gid.raw[11],
-                   rdma_dev->gid.raw[12], rdma_dev->gid.raw[13], rdma_dev->gid.raw[14], rdma_dev->gid.raw[15] );
-    }
-    rdma_dev->gidx = gidx;
-    rdma_dev->is_global = (rdma_dev->gid.global.interface_id != 0);
-    return 0;
-}
-
-/****************************************************************************************
- * Modify target QP state to RTR (on the client side)
- * Return value: 0 - success, 1 - error
- ****************************************************************************************/
-int modify_target_qp_to_rtr(struct rdma_device *rdma_dev, enum ibv_mtu mtu)
-{
-    struct ibv_qp_attr      qp_attr;
-    enum ibv_qp_attr_mask   attr_mask;
-
-    memset(&qp_attr, 0, sizeof qp_attr);
-    qp_attr.qp_state       = IBV_QPS_RTR;
-    qp_attr.path_mtu       = mtu;
-    qp_attr.min_rnr_timer  = 16;
-    qp_attr.ah_attr.port_num    = rdma_dev->ib_port;
-
-    if (rdma_dev->gid.global.interface_id) {
-        qp_attr.ah_attr.is_global = 1;
-        qp_attr.ah_attr.grh.hop_limit  = 1;
-        qp_attr.ah_attr.grh.sgid_index = rdma_dev->gidx;
-    }
-    attr_mask = IBV_QP_STATE          |
-                IBV_QP_AV             |
-                IBV_QP_PATH_MTU       |
-                IBV_QP_MIN_RNR_TIMER; // for DCT
-
-    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
-               rdma_dev->qp, qp_attr.qp_state, attr_mask);
-    if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
-        fprintf(stderr, "Failed to modify QP to RTR\n");
-        return 1;
-    }
-    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
-
-    return 0;
-}
-
-/****************************************************************************************
- * Modify source QP state to RTR and then to RTS (on the server side)
- * Return value: 0 - success, 1 - error
- ****************************************************************************************/
-int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu mtu)
-{
-    struct ibv_qp_attr      qp_attr;
-    enum ibv_qp_attr_mask   attr_mask;
-
-    memset(&qp_attr, 0, sizeof qp_attr);
-    
-    /* - - - - - - -  Modify QP to RTR  - - - - - - - */
-    qp_attr.qp_state = IBV_QPS_RTR;
-    qp_attr.path_mtu = mtu;
-    qp_attr.ah_attr.port_num = rdma_dev->ib_port;
-
-    if (rdma_dev->gid.global.interface_id) {
-        qp_attr.ah_attr.is_global = 1;
-        qp_attr.ah_attr.grh.hop_limit  = 1;
-        qp_attr.ah_attr.grh.sgid_index = rdma_dev->gidx;
-    }
-    attr_mask = IBV_QP_STATE    |
-                IBV_QP_AV       |
-                IBV_QP_PATH_MTU ;
-
-    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
-               rdma_dev->qp, qp_attr.qp_state, attr_mask);
-    if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
-        fprintf(stderr, "Failed to modify QP to RTR\n");
-        return 1;
-    }
-    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
-
-    /* - - - - - - -  Modify QP to RTS  - - - - - - - */
-    qp_attr.qp_state       = IBV_QPS_RTS;
-    qp_attr.timeout        = 16;
-    qp_attr.retry_cnt      = 7;
-    qp_attr.rnr_retry      = 7;
-    //qp_attr.sq_psn         = 0;
-    qp_attr.max_rd_atomic  = 1;
-    attr_mask = IBV_QP_STATE            |
-                IBV_QP_TIMEOUT          |
-                IBV_QP_RETRY_CNT        |
-                IBV_QP_RNR_RETRY        |
-                IBV_QP_SQ_PSN           |
-                IBV_QP_MAX_QP_RD_ATOMIC ;
-    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
-               rdma_dev->qp, qp_attr.qp_state, attr_mask);
-    if (ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask)) {
-        fprintf(stderr, "Failed to modify QP to RTS\n");
-        return 1;
-    }
-    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
-    
-    return 0;
-}
-
 //============================================================================================
 struct rdma_buffer *rdma_buffer_reg(struct rdma_device *rdma_dev, void *addr, size_t length)
 {
@@ -622,6 +644,7 @@ struct rdma_buffer *rdma_buffer_reg(struct rdma_device *rdma_dev, void *addr, si
 
     enum ibv_access_flags   access_flags =  IBV_ACCESS_LOCAL_WRITE |
                                             IBV_ACCESS_REMOTE_WRITE;
+    /*In the case of local buffer we can use IBV_ACCESS_LOCAL_WRITE only flag*/
     rdma_buff->mr = ibv_reg_mr(rdma_dev->pd, addr, length, access_flags);
     if (!rdma_buff->mr) {
         fprintf(stderr, "Couldn't register GPU MR\n");
@@ -632,44 +655,7 @@ struct rdma_buffer *rdma_buffer_reg(struct rdma_device *rdma_dev, void *addr, si
 
     rdma_buff->buf_addr = addr;
     rdma_buff->buf_size = length;
-    rdma_buff->rkey     = rdma_buff->mr->rkey;
-    rdma_buff->rdma_dev = rdma_dev;
-    rdma_dev->rdma_buff_cnt++;
-
-    return rdma_buff;
-
-clean_rdma_buff:
-    /* We don't decrement device rdma_buff_cnt because we still did not increment it,
-    we just free the allocated for rdma_buff memory. */
-    free(rdma_buff);
-    
-    return NULL;
-}
-
-//============================================================================================
-struct rdma_buffer *rdma_local_buffer_reg(struct rdma_device *rdma_dev, void *addr, size_t length)
-{
-    struct rdma_buffer *rdma_buff;
-    int    ret_val;
-
-    rdma_buff = calloc(1, sizeof *rdma_buff);
-    if (!rdma_buff) {
-        fprintf(stderr, "rdma_buff memory allocation failed\n");
-        return NULL;
-    }
-
-    enum ibv_access_flags   access_flags =  IBV_ACCESS_LOCAL_WRITE;
-    rdma_buff->mr = ibv_reg_mr(rdma_dev->pd, addr, length, access_flags);
-    if (!rdma_buff->mr) {
-        fprintf(stderr, "Couldn't register GPU MR\n");
-        goto clean_rdma_buff;
-    }
-    DEBUG_LOG("ibv_reg_mr completed: buf %p, size = %lu, rkey = 0x%08x\n",
-               addr, length, rdma_buff->mr->rkey);
-
-    rdma_buff->buf_addr = addr;
-    rdma_buff->buf_size = length;
-    /* we are not going to use mr->rkey, because we have only local access to the buffer*/
+    rdma_buff->rkey     = rdma_buff->mr->rkey; /*not used for local buffer case*/
     rdma_buff->rdma_dev = rdma_dev;
     rdma_dev->rdma_buff_cnt++;
 
@@ -760,8 +746,8 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     unsigned long long  rem_buf_addr = 0;
     unsigned long       rem_buf_size = 0;
     unsigned long       rem_buf_rkey = 0;
-    uint16_t            rem_lid = 0;
-    unsigned long       rem_dctn = 0; // QP number from DCT (client)
+    unsigned long       rem_lid = 0;
+    uint16_t            rem_dctn = 0; // QP number from DCT (client)
     int                 is_global = 0;
     union ibv_gid       rem_gid;
     struct rdma_device *rdma_dev = attr->local_buf_rdma->rdma_dev;
@@ -772,10 +758,14 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     rdma_dev->qpex->wr_id = attr->wr_id;
     rdma_dev->qpex->wr_flags = IBV_SEND_SIGNALED;
 
+    DEBUG_LOG_FAST_PATH("Starting to pars desc string: \"%s\"\n", attr->remote_buf_desc_str);
     /*   addr             size     rkey     lid  dctn   g gid
         "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10"*/
-    sscanf(attr->remote_buf_desc_str, "%llx:%lx:%lx:%x:%x:%d",
+    sscanf(attr->remote_buf_desc_str, "%llx:%lx:%lx:%hx:%lx:%d",
            &rem_buf_addr, &rem_buf_size, &rem_buf_rkey, &rem_lid, &rem_dctn, &is_global);
+    DEBUG_LOG_FAST_PATH("rem_buf_addr = 0x%llx, rem_buf_size = 0x%x, rem_buf_rkey = 0x%x, rem_lid = 0x%x, rem_dctn = 0x%x, is_global = %d\n",
+                        rem_buf_addr, rem_buf_size, rem_buf_rkey, rem_lid, (uint16_t)rem_dctn, is_global);
+
 
     memset(&rem_gid, 0, sizeof rem_gid);
     if (is_global) {
@@ -847,20 +837,17 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
                           struct rdma_completion_event  *event,
                           uint32_t                      num_entries)
 {
-    struct ibv_wc wc[100];
+    struct ibv_wc wc[16];
     int    reported_entries, i;
 
-    // I don't want to malloc/free whole the run
-    if (num_entries > 100){
-        fprintf(stderr, "given num_entries %d for rdma_poll_completions exceed the max number %d\n",
-                num_entries, 100);
-        return 0;
+    if (num_entries > 16){
+        num_entries = 16; /* We don't returne more than 16 entries,
+                        If user needs more, he can call rdma_poll_completions again */
     }
 
-    // Polling completion queue
+    /* Polling completion queue */
 //    do {
-    debug_fast_path = 0; //MB - debug
-    DEBUG_LOG_FAST_PATH("Polling completion queue: ibv_poll_cq\n");
+    //DEBUG_LOG_FAST_PATH("Polling completion queue: ibv_poll_cq\n");
     reported_entries = ibv_poll_cq(rdma_dev->cq, num_entries, wc);
     if (reported_entries < 0) {
         fprintf(stderr, "poll CQ failed %d\n", reported_entries);

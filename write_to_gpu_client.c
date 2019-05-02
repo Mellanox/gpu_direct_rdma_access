@@ -277,23 +277,19 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    rdma_dev = rdma_open_device_target(usr_par.ib_devname, usr_par.ib_port); /* client */
+    struct rdma_open_dev_attr open_dev_attr = {
+        .ib_devname = usr_par.ib_devname,
+        .ib_port    = usr_par.ib_port,
+        .gidx       = usr_par.gidx,
+        .mtu        = usr_par.mtu
+    };
+    rdma_dev = rdma_open_device_target(&open_dev_attr); /* client */
     if (usr_par.ib_devname) {
         free(usr_par.ib_devname);
     }
     if (!rdma_dev) {
         ret_val = 1;
         goto clean_socket;
-    }
-    
-    ret_val = rdma_set_lid_gid_from_port_info(rdma_dev, usr_par.gidx);
-    if (ret_val) {
-        goto clean_device;
-    }
-
-    ret_val = modify_target_qp_to_rtr(rdma_dev, usr_par.mtu);
-    if (ret_val) {
-        goto clean_device;
     }
     
     if (gettimeofday(&start, NULL)) {

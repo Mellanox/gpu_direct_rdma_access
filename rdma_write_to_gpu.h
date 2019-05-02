@@ -33,7 +33,6 @@
 #ifndef _RDMA_WRITE_TO_GPU_H_
 #define _RDMA_WRITE_TO_GPU_H_
 
-/* This file defines `enum ibv_mtu'  */
 #include <infiniband/verbs.h>
 #include <infiniband/mlx5dv.h>
 /* This file defines `struct iovec'  */
@@ -55,6 +54,12 @@ struct rdma_device;
  */
 struct rdma_buffer;
 
+struct rdma_open_dev_attr {
+    const char      *ib_devname;
+    int             ib_port;
+    int             gidx;
+    enum ibv_mtu    mtu;
+};
 /*
  * Open a RDMA device and allocated requiered resources.
  * find the capable RDMA device based on the 'addr' as an ip address
@@ -66,8 +71,8 @@ struct rdma_buffer;
  *
  * returns: a pointer to a rdma_device object or NULL on error
  */
-struct rdma_device *rdma_open_device_target(const char *ib_dev_name /*struct sockaddr *addr*/, int ib_port); /* client */
-struct rdma_device *rdma_open_device_source(const char *ib_dev_name /*struct sockaddr *addr*/, int ib_port); /* server */
+struct rdma_device *rdma_open_device_target(struct rdma_open_dev_attr *open_dev_attr); /* client */
+struct rdma_device *rdma_open_device_source(struct rdma_open_dev_attr *open_dev_attr); /* server */
 
 /*
  * Close and release all rdma_device resources
@@ -75,16 +80,10 @@ struct rdma_device *rdma_open_device_source(const char *ib_dev_name /*struct soc
 void rdma_close_device(struct rdma_device *device);
 
 
-// TODO - change to static
-int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev, int gidx);
-int modify_target_qp_to_rtr(struct rdma_device *rdma_dev, enum ibv_mtu mtu);
-int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu mtu);
-
 /*
  * register and deregister an applciation buffer with the RDMA device
  */
 struct rdma_buffer *rdma_buffer_reg(struct rdma_device *device, void *addr, size_t length);
-struct rdma_buffer *rdma_local_buffer_reg(struct rdma_device *rdma_dev, void *addr, size_t length);
 void rdma_buffer_dereg(struct rdma_buffer *buffer);
 
 /*

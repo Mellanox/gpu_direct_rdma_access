@@ -263,24 +263,20 @@ int main(int argc, char *argv[])
         }
         return 1;
     }
-   
-    rdma_dev = rdma_open_device_source(usr_par.ib_devname, usr_par.ib_port); /* server */
+
+    struct rdma_open_dev_attr open_dev_attr = {
+        .ib_devname = usr_par.ib_devname,
+        .ib_port    = usr_par.ib_port,
+        .gidx       = usr_par.gidx,
+        .mtu        = usr_par.mtu
+    };
+    rdma_dev = rdma_open_device_source(&open_dev_attr); /* server */
     if (usr_par.ib_devname) {
         free(usr_par.ib_devname);
     }
     if (!rdma_dev) {
         ret_val = 1;
         goto clean_socket;
-    }
-    
-    ret_val = rdma_set_lid_gid_from_port_info(rdma_dev, usr_par.gidx);
-    if (ret_val) {
-        goto clean_device;
-    }
-
-    ret_val = modify_source_qp_to_rtr_and_rts(rdma_dev, usr_par.mtu);
-    if (ret_val) {
-        goto clean_device;
     }
     
     if (gettimeofday(&start, NULL)) {
@@ -300,7 +296,7 @@ int main(int argc, char *argv[])
     /* RDMA buffer registration */
     struct rdma_buffer *rdma_buff;
 
-    rdma_buff = rdma_local_buffer_reg(rdma_dev, buff, usr_par.size);
+    rdma_buff = rdma_buffer_reg(rdma_dev, buff, usr_par.size);
     if (!rdma_buff) {
         ret_val = 1;
         goto clean_mem_buff;
