@@ -54,8 +54,9 @@
 
 #include "gpu_mem_util.h"
 
-static int debug = 1;
-static int debug_fast_path = 1;
+extern int debug;
+extern int debug_fast_path;
+
 #define DEBUG_LOG if (debug) printf
 #define DEBUG_LOG_FAST_PATH if (debug_fast_path) printf
 #define FDEBUG_LOG if (debug) fprintf
@@ -172,25 +173,22 @@ static int free_gpu(void *gpu_buff)
  * Memory allocation on CPU or GPU according to HAVE_CUDA pre-compile option and use_cuda flag
  * Return value: Allocated buffer pointer (if success), NULL (if error)
  ****************************************************************************************/
-#ifdef HAVE_CUDA
 void *work_buffer_alloc(size_t length, int use_cuda)
-#else
-void *work_buffer_alloc(size_t length)
-#endif //HAVE_CUDA
 {
-    void    *buff;
+    void    *buff = NULL;
 
-#ifdef HAVE_CUDA
     if (use_cuda) {
         /* Mem allocation on GPU */
+#ifdef HAVE_CUDA
         buff = init_gpu(length);
+#else
+        fprintf(stderr, "Can't init GPU, HAVE_CUDA mode isn't set");
+#endif //HAVE_CUDA
         if (!buff) {
             fprintf(stderr, "Couldn't allocate work buffer on GPU.\n");
             return NULL;
         }
-    } else
-#endif //HAVE_CUDA
-    {
+    } else {
         /* Mem allocation on CPU */
         int page_size = sysconf(_SC_PAGESIZE);
         buff = memalign(page_size, length);
@@ -198,6 +196,7 @@ void *work_buffer_alloc(size_t length)
             fprintf(stderr, "Couldn't allocate work buffer on CPU.\n");
             return NULL;
         }
+        DEBUG_LOG("memory buffer(%p) allocated\n", buff);
     }
     return buff;
 }
@@ -205,18 +204,15 @@ void *work_buffer_alloc(size_t length)
 /****************************************************************************************
  * CPU or GPU memory free, according to HAVE_CUDA pre-compile option and use_cuda flag
  ****************************************************************************************/
-#ifdef HAVE_CUDA
 void work_buffer_free(void *buff, int use_cuda)
-#else
-void work_buffer_free(void *buff)
-#endif //HAVE_CUDA
 {
-#ifdef HAVE_CUDA
     if (use_cuda) {
+#ifdef HAVE_CUDA
         free_gpu(buff);
-    } else
+#else
+        fprintf(stderr, "Can't free GPU, HAVE_CUDA mode isn't set");
 #endif //HAVE_CUDA
-    {
+    } else {
         DEBUG_LOG("free memory buffer(%p)\n", buff);
         free(buff);
     }

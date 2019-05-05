@@ -48,8 +48,9 @@
 #include "gpu_mem_util.h"
 #include "rdma_write_to_gpu.h"
 
-static int debug = 1;
-static int debug_fast_path = 1;
+extern int debug;
+extern int debug_fast_path;
+
 #define DEBUG_LOG if (debug) printf
 #define DEBUG_LOG_FAST_PATH if (debug_fast_path) printf
 #define FDEBUG_LOG if (debug) fprintf
@@ -138,12 +139,14 @@ static void usage(const char *argv0)
     printf("\n");
     printf("Options:\n");
     printf("  -p, --port=<port>         listen on/connect to port <port> (default 18515)\n");
-    printf("  -d, --ib-dev=<dev>        use IB device <dev> (default first device found)\n");
+    printf("  -d, --ib-dev=<dev>        use IB device <dev> (the flag is mandatory)\n");
     printf("  -i, --ib-port=<port>      use port <port> of IB device (default 1)\n");
     printf("  -s, --size=<size>         size of message to exchange (default 4096)\n");
     printf("  -m, --mtu=<size>          path MTU (default 1024)\n");
     printf("  -n, --iters=<iters>       number of exchanges (default 1000)\n");
     printf("  -g, --gid-idx=<gid index> local port gid index\n");
+    printf("  -D, --debug-mask=<mask>   debug bitmask: bit 0 - debug print enable,"
+           "                                           bit 1 - fast path debug print enable\n");
 }
 
 static int parse_command_line(int argc, char *argv[], struct user_params *usr_par)
@@ -168,10 +171,11 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             { .name = "mtu",           .has_arg = 1, .val = 'm' },
             { .name = "iters",         .has_arg = 1, .val = 'n' },
             { .name = "gid-idx",       .has_arg = 1, .val = 'g' },
+            { .name = "debug-mask",    .has_arg = 1, .val = 'D' },
             { 0 }
         };
 
-        c = getopt_long(argc, argv, "p:d:i:s:m:n:g:",
+        c = getopt_long(argc, argv, "p:d:i:s:m:n:g:D:",
                 long_options, NULL);
         
         if (c == -1)
@@ -225,6 +229,11 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             usr_par->gidx = strtol(optarg, NULL, 0);
             break;
 
+        case 'D':
+            debug           = (strtol(optarg, NULL, 0) >> 0) & 1; /*bit 0*/
+            debug_fast_path = (strtol(optarg, NULL, 0) >> 1) & 1; /*bit 1*/
+            break;
+
         default:
             usage(argv[0]);
             return 1;
@@ -255,7 +264,7 @@ int main(int argc, char *argv[])
         return ret_val;
     }
 
-    DEBUG_LOG ("Listening to remote client, accepting connection.\n");
+    printf("Listening to remote client...\n");
     sockfd = open_server_socket(usr_par.port);
     if (sockfd < 0) {
         if (usr_par.ib_devname) {
@@ -263,6 +272,7 @@ int main(int argc, char *argv[])
         }
         return 1;
     }
+    printf("Connection accepted.\n");
 
     struct rdma_open_dev_attr open_dev_attr = {
         .ib_devname = usr_par.ib_devname,
@@ -279,16 +289,11 @@ int main(int argc, char *argv[])
         goto clean_socket;
     }
     
-    if (gettimeofday(&start, NULL)) {
-        perror("gettimeofday");
-        ret_val = 1;
-        goto clean_device;
-    }
- 
     /* Local memory buffer allocation */
     void    *buff;
     
-    buff = work_buffer_alloc(usr_par.size);
+    buff = work_buffer_alloc(usr_par.size, 0 /*use_cuda*/);
+            /* On the server side, we allocate buffer on CPU and not on GPU */
     if (!buff) {
         ret_val = 1;
         goto clean_device;
@@ -302,6 +307,12 @@ int main(int argc, char *argv[])
         goto clean_mem_buff;
     }
 
+    if (gettimeofday(&start, NULL)) {
+        perror("gettimeofday");
+        ret_val = 1;
+        goto clean_rdma_buff;
+    }
+ 
     /****************************************************************************************************
      * The main loop where we client and server send and receive "iters" number of messages
      */
@@ -314,13 +325,14 @@ int main(int argc, char *argv[])
         struct rdma_write_attr  write_attr;
 
         /* Receiving RDMA data (address, size, rkey etc.) from socket as a triger to start RDMA write operation */
-        DEBUG_LOG_FAST_PATH("Iteration %d: Waiting to Receive message\n", scnt);
+        DEBUG_LOG_FAST_PATH("Iteration %d: Waiting to Receive message of size %d\n", scnt, sizeof desc_str);
         r_size = recv(sockfd, desc_str, sizeof desc_str, MSG_WAITALL);
         if (r_size != sizeof desc_str) {
             fprintf(stderr, "Couldn't receive RDMA data for iteration %d\n", scnt);
             ret_val = 1;
             goto clean_rdma_buff;
         }
+        DEBUG_LOG_FAST_PATH("Received message \"%s\"\n", desc_str);
         memset(&write_attr, 0, sizeof write_attr);
         write_attr.remote_buf_desc_str      = desc_str;
         write_attr.remote_buf_desc_length   = sizeof desc_str;
@@ -354,7 +366,7 @@ int main(int argc, char *argv[])
                 goto clean_rdma_buff;
             }
         }
-        scnt+=reported_ev;
+        scnt += reported_ev;
 
         // Sending ack-message to the client, confirming that RDMA write has been completet
         if (write(sockfd, "rdma_write completed", sizeof("rdma_write completed")) != sizeof("rdma_write completed")) {
@@ -373,7 +385,7 @@ clean_rdma_buff:
     rdma_buffer_dereg(rdma_buff);
 
 clean_mem_buff:
-    work_buffer_free(buff);
+    work_buffer_free(buff, 0);
 
 clean_device:
     rdma_close_device(rdma_dev);

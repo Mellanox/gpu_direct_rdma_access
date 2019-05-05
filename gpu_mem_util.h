@@ -42,20 +42,12 @@ extern "C" {
  *
  * returns: a pointer to the allocated buffer or NULL on error
  */
-#ifdef HAVE_CUDA
 void *work_buffer_alloc(size_t length, int use_cuda);
-#else
-void *work_buffer_alloc(size_t length);
-#endif //HAVE_CUDA
 
 /*
  * CPU or GPU memory free, according to HAVE_CUDA pre-compile option and use_cuda flag
  */
-#ifdef HAVE_CUDA
 void work_buffer_free(void *buff, int use_cuda);
-#else
-void work_buffer_free(void *buff);
-#endif //HAVE_CUDA
 
 
 #ifdef __cplusplus

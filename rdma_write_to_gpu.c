@@ -50,8 +50,9 @@
 
 #include "rdma_write_to_gpu.h"
 
-static int debug = 1;
-static int debug_fast_path = 1;
+int debug = 0;
+int debug_fast_path = 0;
+
 #define DEBUG_LOG if (debug) printf
 #define DEBUG_LOG_FAST_PATH if (debug_fast_path) printf
 #define FDEBUG_LOG if (debug) fprintf
@@ -59,8 +60,10 @@ static int debug_fast_path = 1;
 
 #define CQ_DEPTH        8
 #define SEND_Q_DEPTH    64
-#define MAX_SEND_SGE    16
+#define MAX_SEND_SGE    20
 #define DC_KEY          0xffeeddcc  /*this is defined for both sides: client and server*/
+
+#define mmin(a, b)      a < b ? a : b
 
 /* RDMA control buffer */
 struct rdma_device {
@@ -489,7 +492,7 @@ struct rdma_device *rdma_open_device_source(struct rdma_open_dev_attr *open_dev_
     attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCI;
     
     attr_ex.cap.max_send_wr  = SEND_Q_DEPTH;
-    attr_ex.cap.max_send_sge = MAX_SEND_SGE; // in old example 1???
+    attr_ex.cap.max_send_sge = MAX_SEND_SGE;
 
     attr_ex.comp_mask |= IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
     attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE/* | IBV_QP_EX_WITH_RDMA_READ*/;
@@ -750,22 +753,19 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     uint16_t            rem_dctn = 0; // QP number from DCT (client)
     int                 is_global = 0;
     union ibv_gid       rem_gid;
+    
     struct rdma_device *rdma_dev = attr->local_buf_rdma->rdma_dev;
 
-    /* RDMA Write for DCI connect, this will create cqe->ts_start */
-    DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_start: qpex = %p\n", rdma_dev->qpex);
-    ibv_wr_start(rdma_dev->qpex);
-    rdma_dev->qpex->wr_id = attr->wr_id;
-    rdma_dev->qpex->wr_flags = IBV_SEND_SIGNALED;
-
-    DEBUG_LOG_FAST_PATH("Starting to pars desc string: \"%s\"\n", attr->remote_buf_desc_str);
+    /*
+     * Parse desc string, extracting remote buffer address, size, rkey, lid, dctn, and if global is true, also gid
+     */
+    DEBUG_LOG_FAST_PATH("Starting to parse desc string: \"%s\"\n", attr->remote_buf_desc_str);
     /*   addr             size     rkey     lid  dctn   g gid
         "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10"*/
     sscanf(attr->remote_buf_desc_str, "%llx:%lx:%lx:%hx:%lx:%d",
            &rem_buf_addr, &rem_buf_size, &rem_buf_rkey, &rem_lid, &rem_dctn, &is_global);
     DEBUG_LOG_FAST_PATH("rem_buf_addr = 0x%llx, rem_buf_size = 0x%x, rem_buf_rkey = 0x%x, rem_lid = 0x%x, rem_dctn = 0x%x, is_global = %d\n",
                         rem_buf_addr, rem_buf_size, rem_buf_rkey, rem_lid, (uint16_t)rem_dctn, is_global);
-
 
     memset(&rem_gid, 0, sizeof rem_gid);
     if (is_global) {
@@ -776,6 +776,46 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
                          rem_gid.raw[4],  rem_gid.raw[5],  rem_gid.raw[6],  rem_gid.raw[7], 
                          rem_gid.raw[8],  rem_gid.raw[9],  rem_gid.raw[10], rem_gid.raw[11],
                          rem_gid.raw[12], rem_gid.raw[13], rem_gid.raw[14], rem_gid.raw[15] );
+
+    /*
+     * Pass attr->local_buf_iovec - local_buf_iovcnt elements and check that
+     * the sum of local_buf_iovec[i].iov_len doesn't exceed rem_buf_size
+     */
+    int     i;
+    int     total_len = 0;
+    for (i = 0; i < attr->local_buf_iovcnt; i++) {
+        if ((attr->local_buf_iovec[i].iov_base < attr->local_buf_rdma->buf_addr) ||
+            (attr->local_buf_iovec[i].iov_base + attr->local_buf_iovec[i].iov_len >
+             attr->local_buf_rdma->buf_addr + attr->local_buf_rdma->buf_size)) {
+
+            fprintf(stderr, "sge buffer %d (%p, %p) exceeds the local buffer bounary (%p, %p)\n", i,
+                    attr->local_buf_iovec[i].iov_base, attr->local_buf_iovec[i].iov_base + attr->local_buf_iovec[i].iov_len,
+                    attr->local_buf_rdma->buf_addr, attr->local_buf_rdma->buf_addr + attr->local_buf_rdma->buf_size);
+            return 1;
+        }
+        total_len += attr->local_buf_iovec[i].iov_len;
+        if (total_len > rem_buf_size) {
+            fprintf(stderr, "The sum of sge buffers lengths (%d) exceeded the remote buffer size %d on iteration %d\n",
+                    total_len, rem_buf_size, i);
+            return 1;
+        }
+    }
+    if ((attr->local_buf_iovcnt) && (total_len != rem_buf_size)) {
+        fprintf(stderr, "The sum of sge buffers lengths (%d) differs from the remote buffer size %d\n",
+                total_len, rem_buf_size, i);
+        return 1;
+    }
+    if ((!attr->local_buf_iovcnt) && (rem_buf_size > attr->local_buf_rdma->buf_size)) {
+        fprintf(stderr, "When not using sge list, the requested buffer size %u is greater than allocated local size %u\n",
+                rem_buf_size, attr->local_buf_rdma->buf_size);
+        return 1;
+    }
+    
+    /* RDMA Write for DCI connect, this will create cqe->ts_start */
+    DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_start: qpex = %p\n", rdma_dev->qpex);
+    ibv_wr_start(rdma_dev->qpex);
+    rdma_dev->qpex->wr_id = attr->wr_id;
+    rdma_dev->qpex->wr_flags = IBV_SEND_SIGNALED;
 
     DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
                         rdma_dev->qpex, rem_buf_rkey, (unsigned long long)rem_buf_addr);
@@ -808,14 +848,30 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
                         rdma_dev->mqpex, ah, rem_dctn);
     mlx5dv_wr_set_dc_addr(rdma_dev->mqpex, ah, rem_dctn, DC_KEY);
     
-    DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
-                        rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (unsigned long long)attr->local_buf_rdma->buf_addr, 1);
-    if (rem_buf_size > attr->local_buf_rdma->buf_size) {
-        DEBUG_LOG_FAST_PATH("Remote buffer size %u is greater than local %u, changing the send size to the local size\n",
-                            rem_buf_size, attr->local_buf_rdma->buf_size);
-        rem_buf_size = attr->local_buf_rdma->buf_size;
+    if (attr->local_buf_iovcnt) {
+        int     num_sges_to_send = attr->local_buf_iovcnt,
+                start_i = 0;
+        struct ibv_sge sg_list[MAX_SEND_SGE];
+
+        while (num_sges_to_send > 0) {
+            int     curr_iovcnt;
+            curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
+            for (i = 0; i < curr_iovcnt; i++) {
+                sg_list[i].addr   = (uint64_t)attr->local_buf_iovec[start_i + i].iov_base;
+                sg_list[i].length = (uint32_t)attr->local_buf_iovec[start_i + i].iov_len;
+                sg_list[i].lkey   = (uint32_t)attr->local_buf_rdma->mr->lkey;
+            }
+            DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge_list(qpex = %p, num_sge %u, sg_list %p), start_i %d, num_sges_to_send %d\n",
+                                rdma_dev->qpex, (size_t)curr_iovcnt, (void*)sg_list, num_sges_to_send);
+            ibv_wr_set_sge_list(rdma_dev->qpex, (size_t)curr_iovcnt, sg_list);
+            num_sges_to_send -= curr_iovcnt;
+            start_i += curr_iovcnt;
+        }
+    } else {
+        DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
+                            rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (unsigned long long)attr->local_buf_rdma->buf_addr, 1);
+        ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (uintptr_t)attr->local_buf_rdma->buf_addr, (uint32_t)rem_buf_size);
     }
-    ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (uintptr_t)attr->local_buf_rdma->buf_addr, (uint32_t)rem_buf_size);
 
     //TODO - in the current implementation when we are not using hash, we need to free ah
     //int ret_val = ibv_destroy_ah(ah);
