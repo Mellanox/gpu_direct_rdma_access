@@ -66,6 +66,7 @@ struct user_params {
     int                  iters;
     int                  gidx;
     int                  use_cuda;
+    char                *bdf;
     char                *servername;
 };
 
@@ -132,8 +133,9 @@ static void usage(const char *argv0)
     printf("  -m, --mtu=<size>          path MTU (default 1024)\n");
     printf("  -n, --iters=<iters>       number of exchanges (default 1000)\n");
     printf("  -g, --gid-idx=<gid index> local port gid index\n");
-    printf("  -u, --use-cuda            use CUDA pacage (work with GPU memoty)\n");
-    printf("  -D, --debug-mask=<mask>   debug bitmask: bit 0 - debug print enable,"
+    printf("  -u, --use-cuda=<BDF>      use CUDA pacage (work with GPU memoty),\n"
+           "                            BDF corresponding to CUDA device, for example, \"0000:3e:02.0\"\n");
+    printf("  -D, --debug-mask=<mask>   debug bitmask: bit 0 - debug print enable,\n"
            "                                           bit 1 - fast path debug print enable\n");
 }
 
@@ -159,12 +161,12 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             { .name = "mtu",           .has_arg = 1, .val = 'm' },
             { .name = "iters",         .has_arg = 1, .val = 'n' },
             { .name = "gid-idx",       .has_arg = 1, .val = 'g' },
-            { .name = "use-cuda",      .has_arg = 0, .val = 'u' },
+            { .name = "use-cuda",      .has_arg = 1, .val = 'u' },
             { .name = "debug-mask",    .has_arg = 1, .val = 'D' },
             { 0 }
         };
 
-        c = getopt_long(argc, argv, "p:d:i:s:m:n:g:uD:",
+        c = getopt_long(argc, argv, "p:d:i:s:m:n:g:u:D:",
                         long_options, NULL);
         if (c == -1)
             break;
@@ -219,6 +221,12 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
 
         case 'u':
             usr_par->use_cuda = 1;
+            usr_par->bdf = calloc(1, strlen(optarg)+1);
+            if (!usr_par->bdf){
+                perror("BDF mem alloc failure");
+                return 1;
+            }
+            strcpy(usr_par->bdf, optarg);
             break;
         
         case 'D':
@@ -230,6 +238,12 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             usage(argv[0]);
             return 1;
         }
+    }
+
+    if (!usr_par->ib_devname){
+        fprintf(stderr, "IB device name is missing in the command line.");
+        usage(argv[0]);
+        return 1;
     }
 
     if (optind == argc) {
@@ -250,12 +264,6 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
         return 1;
     }
 
-    if (!usr_par->ib_devname){
-        fprintf(stderr, "IB device name is missing in the command line.");
-        usage(argv[0]);
-        return 1;
-    }
-
     return 0;
 }
 
@@ -272,7 +280,10 @@ int main(int argc, char *argv[])
 
     ret_val = parse_command_line(argc, argv, &usr_par);
     if (ret_val) {
-        return ret_val;
+        ret_val = 1;
+        /* We don't exit here, because when parse_command_line failed, probably
+           some of memory allocations were completed, so we need to free them */
+        goto clean_usr_par;
     }
     
     printf("Connecting to remote server \"%s\"\n", usr_par.servername);
@@ -280,10 +291,8 @@ int main(int argc, char *argv[])
     free(usr_par.servername);
 
     if (sockfd < 0) {
-        if (usr_par.ib_devname) {
-            free(usr_par.ib_devname);
-        }
-        return 1;
+        ret_val = 1;
+        goto clean_usr_par;
     }
 
     struct rdma_open_dev_attr open_dev_attr = {
@@ -293,21 +302,31 @@ int main(int argc, char *argv[])
         .mtu        = usr_par.mtu
     };
     rdma_dev = rdma_open_device_target(&open_dev_attr); /* client */
-    if (usr_par.ib_devname) {
-        free(usr_par.ib_devname);
-    }
     if (!rdma_dev) {
         ret_val = 1;
         goto clean_socket;
     }
     
+    /* We don't need ib_devname any more, sio we can free this. */
+    if (usr_par.ib_devname) {
+        free(usr_par.ib_devname);
+        usr_par.ib_devname = NULL;
+    }
+
     /* CPU or GPU memory buffer allocation */
     void    *buff;
-    buff = work_buffer_alloc(usr_par.size, usr_par.use_cuda);
+    buff = work_buffer_alloc(usr_par.size, usr_par.use_cuda, usr_par.bdf);
     if (!buff) {
         ret_val = 1;
         goto clean_device;
     }
+    
+    /* We don't need bdf any more, sio we can free this. */
+    if (usr_par.bdf) {
+        free(usr_par.bdf);
+        usr_par.bdf = NULL;
+    }
+    
     /* RDMA buffer registration */
     struct rdma_buffer *rdma_buff;
 
@@ -381,6 +400,14 @@ clean_device:
 
 clean_socket:
     close(sockfd);
+
+clean_usr_par:
+    if (usr_par.ib_devname) {
+        free(usr_par.ib_devname);
+    }
+    if (usr_par.bdf) {
+        free(usr_par.bdf);
+    }
 
     return ret_val;
 }

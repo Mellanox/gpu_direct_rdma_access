@@ -78,14 +78,91 @@ extern int debug_fast_path;
 
 /*----------------------------------------------------------------------------*/
 
-static CUdevice cuDevice;
 static CUcontext cuContext;
 
-static void *init_gpu(size_t gpu_buf_size)
+/*
+ * Debug print information about all available CUDA devices
+ */
+static void print_gpu_devices_info(void)
+{
+    int     device_count = 0;
+    int     i;
+    
+    CUCHECK(cuDeviceGetCount(&device_count));
+    
+    DEBUG_LOG("The number of supporting CUDA devices is %d.\n", device_count);
+    
+    for (i = 0; i < device_count; i++) {
+        CUdevice    cu_dev;
+        char        name[128];
+        int         pci_bus_id    = 0;
+        int         pci_device_id = 0;
+        int         pci_domain_id = 0;
+        int         pci_func = 0; /*always 0 for CUDA device*/
+
+        CUCHECK(cuDeviceGet(&cu_dev, i));
+        CUCHECK(cuDeviceGetName(name, sizeof(name), cu_dev));
+        CUCHECK(cuDeviceGetAttribute (&pci_bus_id   , CU_DEVICE_ATTRIBUTE_PCI_BUS_ID   , cu_dev)); /*PCI bus identifier of the device*/
+        CUCHECK(cuDeviceGetAttribute (&pci_device_id, CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID, cu_dev)); /*PCI device (also known as slot) identifier of the device*/
+        CUCHECK(cuDeviceGetAttribute (&pci_domain_id, CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID, cu_dev)); /*PCI domain identifier of the device*/
+
+        DEBUG_LOG("device %d, handle %d, name \"%s\", BDF %04x:%02x:%02x.%d\n",
+                  i, cu_dev, name, pci_domain_id, pci_bus_id, pci_device_id, pci_func);
+    }
+}
+
+static int get_gpu_device_id_from_bdf(const char *bdf)
+{
+    int     given_domain_id = 0;
+    int     given_bus_id = 0;
+    int     given_device_id = 0;
+    int     given_func = 0;
+    int     device_count = 0;
+    int     i;
+    int     ret_val;
+    
+                    /*    "0000:3e:02.0"*/
+    ret_val = sscanf(bdf, "%x:%x:%x.%x", &given_domain_id, &given_bus_id, &given_device_id, &given_func);
+    if (ret_val != 4){
+        fprintf(stderr, "Wrong BDF format \"%s\". Expected format example: \"0000:3e:02.0\", "
+                        "where 0000 - domain id, 3e - bus id, 02 - device id, 0 - function\n", bdf);
+        return -1;
+    }
+    if (given_func != 0) {
+        fprintf(stderr, "Wrong pci function %d, 0 is expected\n", given_func)
+        return -1;
+    }
+    CUCHECK(cuDeviceGetCount(&device_count));
+    
+    if (device_count == 0) {
+        fprintf(stderr, "There are no available devices that support CUDA\n");
+        return -1;
+    }
+
+    for (i = 0; i < device_count; i++) {
+        CUdevice    cu_dev;
+        int         pci_bus_id    = 0;
+        int         pci_device_id = 0;
+        int         pci_domain_id = 0;
+
+        CUCHECK(cuDeviceGet(&cu_dev, i));
+        CUCHECK(cuDeviceGetAttribute (&pci_bus_id   , CU_DEVICE_ATTRIBUTE_PCI_BUS_ID   , cu_dev)); /*PCI bus identifier of the device*/
+        CUCHECK(cuDeviceGetAttribute (&pci_device_id, CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID, cu_dev)); /*PCI device (also known as slot) identifier of the device*/
+        CUCHECK(cuDeviceGetAttribute (&pci_domain_id, CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID, cu_dev)); /*PCI domain identifier of the device*/
+        if ((pci_domain_id == given_domain_id) && (pci_bus_id == given_bus_id) && (pci_device_id == given_device_id)){
+            return i;
+        }
+    }
+    fprintf(stderr, "Given BDF \"%s\" doesn't match one of GPU devices\n", bdf)
+    return -1;
+}
+
+static void *init_gpu(size_t gpu_buf_size, const char *bdf)
 {
     const size_t    gpu_page_size = 64*1024;
     size_t          aligned_size;
     CUresult        error;
+    int             dev_id;
 
     aligned_size = (gpu_buf_size + gpu_page_size - 1) & ~(gpu_page_size - 1);
     printf("initializing CUDA\n");
@@ -95,41 +172,26 @@ static void *init_gpu(size_t gpu_buf_size)
         return NULL;
     }
 
-    int deviceCount = 0;
-    error = cuDeviceGetCount(&deviceCount);
     if (error != CUDA_SUCCESS) {
         fprintf(stderr, "cuDeviceGetCount() returned %d\n", error);
         return NULL;
     }
 
-    /* This function call returns NULL if there are no CUDA capable devices. */
-    if (deviceCount == 0) {
-        fprintf(stderr, "There are no available device(s) that support CUDA\n");
+    int dev_id = get_gpu_device_id_from_bdf(bdf);
+    if (dev_id < 0) {
+        fprintf(stderr, "Wrong device index (%d) obtained from bdf \"%s\"\n",
+                dev_id, bdf);
+        /* This function returns NULL if there are no CUDA capable devices. */
         return NULL;
-    } else if (deviceCount == 1) {
-        DEBUG_LOG("There is 1 device supporting CUDA\n");
-    } else {
-        DEBUG_LOG("There are %d devices supporting CUDA, picking first...\n", deviceCount);
     }
 
-    int devID = 0;
-
-    /* pick up device with zero ordinal (default, or devID) */
-    CUCHECK(cuDeviceGet(&cuDevice, devID));
-
-    char name[128];
-    CUCHECK(cuDeviceGetName(name, sizeof(name), devID));
-    DEBUG_LOG("[pid = %d, dev = %d] device name = [%s]\n", getpid(), cuDevice, name);
-    
-    for (devID = 0; devID < deviceCount; devID++) {
-        int pci_bus_id = 0;
-        CUCHECK(cuDeviceGetAttribute (&pci_bus_id, CU_DEVICE_ATTRIBUTE_PCI_BUS_ID, devID));
-        DEBUG_LOG("Dev ID %d: pci_bus_id = %d\n", devID, pci_bus_id);
-    }
+    /* Pick up device by given dev_id - an ordinal in the range [0, cuDeviceGetCount()-1] */
+    CUdevice    cu_dev;
+    CUCHECK(cuDeviceGet(&cu_dev, dev_id));
 
     DEBUG_LOG("creating CUDA Contnext\n");
     /* Create context */
-    error = cuCtxCreate(&cuContext, CU_CTX_MAP_HOST, cuDevice);
+    error = cuCtxCreate(&cuContext, CU_CTX_MAP_HOST, cu_dev);
     if (error != CUDA_SUCCESS) {
         fprintf(stderr, "cuCtxCreate() error=%d\n", error);
         return NULL;
@@ -173,14 +235,17 @@ static int free_gpu(void *gpu_buff)
  * Memory allocation on CPU or GPU according to HAVE_CUDA pre-compile option and use_cuda flag
  * Return value: Allocated buffer pointer (if success), NULL (if error)
  ****************************************************************************************/
-void *work_buffer_alloc(size_t length, int use_cuda)
+void *work_buffer_alloc(size_t length, int use_cuda, const char *bdf)
 {
     void    *buff = NULL;
 
     if (use_cuda) {
         /* Mem allocation on GPU */
 #ifdef HAVE_CUDA
-        buff = init_gpu(length);
+        if (debug) {
+            print_gpu_devices_info();
+        }
+        buff = init_gpu(length, bdf);
 #else
         fprintf(stderr, "Can't init GPU, HAVE_CUDA mode isn't set");
 #endif //HAVE_CUDA

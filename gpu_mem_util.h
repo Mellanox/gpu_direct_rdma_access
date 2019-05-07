@@ -42,7 +42,7 @@ extern "C" {
  *
  * returns: a pointer to the allocated buffer or NULL on error
  */
-void *work_buffer_alloc(size_t length, int use_cuda);
+void *work_buffer_alloc(size_t length, int use_cuda, const char *bdf);
 
 /*
  * CPU or GPU memory free, according to HAVE_CUDA pre-compile option and use_cuda flag

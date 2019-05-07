@@ -292,7 +292,7 @@ int main(int argc, char *argv[])
     /* Local memory buffer allocation */
     void    *buff;
     
-    buff = work_buffer_alloc(usr_par.size, 0 /*use_cuda*/);
+    buff = work_buffer_alloc(usr_par.size, 0 /*use_cuda*/, NULL);
             /* On the server side, we allocate buffer on CPU and not on GPU */
     if (!buff) {
         ret_val = 1;
