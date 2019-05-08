@@ -59,13 +59,11 @@ extern int debug_fast_path;
 struct user_params {
 
     int                  port;
-    int                  ib_port;
     unsigned long        size;
-    char                *ib_devname;
     int                  iters;
-    int                  gidx;
     int                  use_cuda;
     char                *servername;
+    struct sockaddr      hostaddr;
 };
 
 /****************************************************************************************
@@ -124,12 +122,10 @@ static void usage(const char *argv0)
     printf("  %s <host>     connect to server at <host>\n", argv0);
     printf("\n");
     printf("Options:\n");
+    printf("  -a, --addr=<ipaddr>       ip address of the local host net device <ipaddr v4> (mandatory)\n");
     printf("  -p, --port=<port>         listen on/connect to port <port> (default 18515)\n");
-    printf("  -d, --ib-dev=<dev>        use IB device <dev> (the flag is mandatory)\n");
-    printf("  -i, --ib-port=<port>      use port <port> of IB device (default 1)\n");
     printf("  -s, --size=<size>         size of message to exchange (default 4096)\n");
     printf("  -n, --iters=<iters>       number of exchanges (default 1000)\n");
-    printf("  -g, --gid-idx=<gid index> local port gid index\n");
     printf("  -u, --use-cuda            use CUDA pacage (work with GPU memoty)\n");
     printf("  -D, --debug-mask=<mask>   debug bitmask: bit 0 - debug print enable,"
            "                                           bit 1 - fast path debug print enable\n");
@@ -140,54 +136,36 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
     memset(usr_par, 0, sizeof *usr_par);
     /*Set defaults*/
     usr_par->port       = 18515;
-    usr_par->ib_port    = 1;
     usr_par->size       = 4096;
     usr_par->iters      = 1000;
-    usr_par->gidx       = -1;
 
     while (1) {
         int c;
 
         static struct option long_options[] = {
+            { .name = "addr",          .has_arg = 1, .val = 'a' },
             { .name = "port",          .has_arg = 1, .val = 'p' },
-            { .name = "ib-dev",        .has_arg = 1, .val = 'd' },
-            { .name = "ib-port",       .has_arg = 1, .val = 'i' },
             { .name = "size",          .has_arg = 1, .val = 's' },
             { .name = "iters",         .has_arg = 1, .val = 'n' },
-            { .name = "gid-idx",       .has_arg = 1, .val = 'g' },
             { .name = "use-cuda",      .has_arg = 0, .val = 'u' },
             { .name = "debug-mask",    .has_arg = 1, .val = 'D' },
             { 0 }
         };
 
-        c = getopt_long(argc, argv, "p:d:i:s:m:n:g:uD:",
+        c = getopt_long(argc, argv, "a:p:s:m:n:uD:",
                         long_options, NULL);
         if (c == -1)
             break;
 
         switch (c) {
         
+        case 'a':
+            get_addr(optarg, (struct sockaddr *) &usr_par->hostaddr);
+            break;
+
         case 'p':
             usr_par->port = strtol(optarg, NULL, 0);
             if (usr_par->port < 0 || usr_par->port > 65535) {
-                usage(argv[0]);
-                return 1;
-            }
-            break;
-
-        case 'd':
-            //usr_par->ib_devname = strdupa(optarg);
-            usr_par->ib_devname = calloc(1, strlen(optarg)+1);
-            if (!usr_par->ib_devname){
-                perror("ib_devname mem alloc failure");
-                return 1;
-            }
-            strcpy(usr_par->ib_devname, optarg);
-            break;
-
-        case 'i':
-            usr_par->ib_port = strtol(optarg, NULL, 0);
-            if (usr_par->ib_port < 0) {
                 usage(argv[0]);
                 return 1;
             }
@@ -199,10 +177,6 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
 
         case 'n':
             usr_par->iters = strtol(optarg, NULL, 0);
-            break;
-
-        case 'g':
-            usr_par->gidx = strtol(optarg, NULL, 0);
             break;
 
         case 'u':
@@ -238,12 +212,6 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
         return 1;
     }
 
-    if (!usr_par->ib_devname){
-        fprintf(stderr, "IB device name is missing in the command line.");
-        usage(argv[0]);
-        return 1;
-    }
-
     return 0;
 }
 
@@ -263,26 +231,21 @@ int main(int argc, char *argv[])
         return ret_val;
     }
     
+    if (!usr_par.hostaddr.sa_family) {
+        fprintf(stderr, "host ip address is missing in the command line.");
+        usage(argv[0]);
+        return 1;
+    }
+
     printf("Connecting to remote server \"%s\"\n", usr_par.servername);
     sockfd = open_client_socket(usr_par.servername, usr_par.port);
     free(usr_par.servername);
 
     if (sockfd < 0) {
-        if (usr_par.ib_devname) {
-            free(usr_par.ib_devname);
-        }
         return 1;
     }
 
-    struct rdma_open_dev_attr open_dev_attr = {
-        .ib_devname = usr_par.ib_devname,
-        .ib_port    = usr_par.ib_port,
-        .gidx       = usr_par.gidx,
-    };
-    rdma_dev = rdma_open_device_target(&open_dev_attr); /* client */
-    if (usr_par.ib_devname) {
-        free(usr_par.ib_devname);
-    }
+    rdma_dev = rdma_open_device_target(&usr_par.hostaddr); /* client */
     if (!rdma_dev) {
         ret_val = 1;
         goto clean_socket;

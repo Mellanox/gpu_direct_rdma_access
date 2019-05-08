@@ -48,6 +48,10 @@
 #include <arpa/inet.h>
 #include <time.h>
 
+#include <rdma/rdma_cma.h>
+#include <infiniband/mlx5dv.h>
+
+#include "ibv_helper.h"
 #include "rdma_write_to_gpu.h"
 
 int debug = 0;
@@ -67,6 +71,9 @@ int debug_fast_path = 0;
 
 /* RDMA control buffer */
 struct rdma_device {
+
+    struct rdma_event_channel *cm_channel;
+    struct rdma_cm_id *cm_id;
 
     struct ibv_context *context;
     struct ibv_pd      *pd;
@@ -144,7 +151,61 @@ clean_device_list:
     return context;
 }
 
-/****************************************************************************************
+//============================================================================================
+static struct ibv_context *open_ib_device_by_addr(struct rdma_device *rdma_dev, struct sockaddr *addr)
+{
+        int ret;
+	uint16_t sin_port;
+	char str[INET_ADDRSTRLEN];
+
+        rdma_dev->cm_channel = rdma_create_event_channel();
+        if (!rdma_dev->cm_channel) {
+                DEBUG_LOG("rdma_create_event_channel() failure");
+		return NULL;
+        }
+
+        ret = rdma_create_id(rdma_dev->cm_channel, &rdma_dev->cm_id, rdma_dev, RDMA_PS_UDP);
+        if (ret) {
+                DEBUG_LOG("rdma_create_id() failure");
+                goto out1;
+        }
+
+	ret = rdma_bind_addr(rdma_dev->cm_id, addr);
+	if (ret) {
+		DEBUG_LOG("rdma_bind_addr() failure");
+                goto out2;
+	}
+
+        if (addr->sa_family == AF_INET) {
+		sin_port = ((struct sockaddr_in *)addr)->sin_port;
+                inet_ntop(AF_INET, &(((struct sockaddr_in *)addr)->sin_addr), str, INET_ADDRSTRLEN);
+        }
+        else {
+		sin_port = ((struct sockaddr_in6 *)addr)->sin6_port;
+                inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)addr)->sin6_addr), str, INET_ADDRSTRLEN);
+	}
+
+	if (rdma_dev->cm_id->verbs == NULL) {
+		DEBUG_LOG("Failed to bind to an RDMA device, exiting... <%s, %d>\n", str, ntohs(sin_port));
+		goto out2;
+	}
+
+	rdma_dev->ib_port = rdma_dev->cm_id->port_num;
+
+	DEBUG_LOG("Bound to RDMA device, at <%s, %d>, name:%s, port\n",
+		str, ntohs(sin_port), rdma_dev->cm_id->verbs->device->name, rdma_dev->cm_id->port_num);
+
+	return rdma_dev->cm_id->verbs;
+
+out2:
+        rdma_destroy_id(rdma_dev->cm_id);
+out1:
+        rdma_destroy_event_channel(rdma_dev->cm_channel);
+        return NULL;
+
+}
+
+/***********************************************************************************
  * Fill portinfo structure, get lid and gid from portinfo
  * Return value: 0 - success, 1 - error
  ****************************************************************************************/
@@ -160,11 +221,15 @@ static int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev)
     }
 
     rdma_dev->mtu = portinfo.active_mtu;
-
     rdma_dev->lid = portinfo.lid;
     if ((portinfo.link_layer != IBV_LINK_LAYER_ETHERNET) && (!portinfo.lid)) {
         fprintf(stderr, "Couldn't get local LID\n");
         return 1;
+    }
+
+    if ( rdma_dev->cm_id && portinfo.link_layer == IBV_LINK_LAYER_ETHERNET) {
+	    rdma_dev->gidx = ibv_find_sgid_type(rdma_dev->context, rdma_dev->ib_port, 
+			    IBV_GID_TYPE_ROCE_V2, rdma_dev->cm_id->route.addr.src_addr.sa_family);
     }
     
     if (rdma_dev->gidx < 0) {
@@ -284,7 +349,7 @@ static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev)
 }
 
 //============================================================================================
-struct rdma_device *rdma_open_device_target(struct rdma_open_dev_attr *open_dev_attr) /* client */
+struct rdma_device *rdma_open_device_target(struct sockaddr *addr) /* client */
 {
     struct rdma_device *rdma_dev;
     int                 ret_val;
@@ -296,11 +361,11 @@ struct rdma_device *rdma_open_device_target(struct rdma_open_dev_attr *open_dev_
     }
 
     /****************************************************************************************************
-     * In the next function we are checking if given IB device name matches one of devices in the list,
-     * if yes, we open device by the given name and return pointer to the ib context
-     * The result of this function is ig_dev - initialized pointer to the relevant struct ibv_device
+     * In the next function we let rdma_cm find a IB device that matches the IP address of a the local netdev,
+     * if yes, we return a pointer to that ib context
+     * The result of this function is ib_dev - initialized pointer to the relevant struct ibv_device
      ****************************************************************************************************/
-    rdma_dev->context = open_ib_device_by_name(open_dev_attr->ib_devname);
+    rdma_dev->context = open_ib_device_by_addr(rdma_dev, addr);
     if (!rdma_dev->context){
         goto clean_rdma_dev;
     }
@@ -369,7 +434,7 @@ struct rdma_device *rdma_open_device_target(struct rdma_open_dev_attr *open_dev_
     struct ibv_qp_attr qp_attr = {
         .qp_state        = IBV_QPS_INIT,
         .pkey_index      = 0,
-        .port_num        = open_dev_attr->ib_port,
+        .port_num        = rdma_dev->ib_port,
         .qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE
     };
     enum ibv_qp_attr_mask attr_mask = IBV_QP_STATE      |
@@ -385,10 +450,6 @@ struct rdma_device *rdma_open_device_target(struct rdma_open_dev_attr *open_dev_
     }
     DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
-    rdma_dev->ib_port = open_dev_attr->ib_port;
-    rdma_dev->gidx    = open_dev_attr->gidx;
-    /* we should init these 2 attributes before the next 2 funtions call*/
-    
     ret_val = rdma_set_lid_gid_from_port_info(rdma_dev);
     if (ret_val) {
         goto clean_qp;
@@ -399,7 +460,6 @@ struct rdma_device *rdma_open_device_target(struct rdma_open_dev_attr *open_dev_
         goto clean_qp;
     }
     
-
     return rdma_dev;
 
 clean_qp:
@@ -434,7 +494,7 @@ clean_rdma_dev:
 }
 
 //============================================================================================
-struct rdma_device *rdma_open_device_source(struct rdma_open_dev_attr *open_dev_attr) /* server */
+struct rdma_device *rdma_open_device_source(struct sockaddr *addr) /* server */
 {
     struct rdma_device *rdma_dev;
     int                 ret_val;
@@ -446,11 +506,11 @@ struct rdma_device *rdma_open_device_source(struct rdma_open_dev_attr *open_dev_
     }
 
     /****************************************************************************************************
-     * In the next function we are checking if given IB device name matches one of devices in the list,
-     * if yes, we open device by the given name and return pointer to the ib context
-     * The result of this function is ig_dev - initialized pointer to the relevant struct ibv_device
+     * In the next function we let rdma_cm find a IB device that matches the IP address of a the local netdev,
+     * if yes, we return a pointer to that ib context
+     * The result of this function is ib_dev - initialized pointer to the relevant struct ibv_device
      ****************************************************************************************************/
-    rdma_dev->context = open_ib_device_by_name(open_dev_attr->ib_devname);
+    rdma_dev->context = open_ib_device_by_addr(rdma_dev, addr);
     if (!rdma_dev->context){
         goto clean_rdma_dev;
     }
@@ -526,7 +586,7 @@ struct rdma_device *rdma_open_device_source(struct rdma_open_dev_attr *open_dev_
     struct ibv_qp_attr qp_attr = {
         .qp_state        = IBV_QPS_INIT,
         .pkey_index      = 0,
-        .port_num        = open_dev_attr->ib_port,
+        .port_num        = rdma_dev->ib_port,
         .qp_access_flags = IBV_ACCESS_LOCAL_WRITE
     };
     enum ibv_qp_attr_mask attr_mask = IBV_QP_STATE      |
@@ -542,10 +602,6 @@ struct rdma_device *rdma_open_device_source(struct rdma_open_dev_attr *open_dev_
     }
     DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
-    rdma_dev->ib_port = open_dev_attr->ib_port;
-    rdma_dev->gidx    = open_dev_attr->gidx;
-    /* we should init these 2 attributes before the next 2 funtions call*/
-    
     ret_val = rdma_set_lid_gid_from_port_info(rdma_dev);
     if (ret_val) {
         goto clean_qp;

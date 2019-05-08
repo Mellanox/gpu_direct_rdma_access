@@ -34,7 +34,6 @@
 #define _RDMA_WRITE_TO_GPU_H_
 
 #include <infiniband/verbs.h>
-#include <infiniband/mlx5dv.h>
 /* This file defines `struct iovec'  */
 #include <bits/uio.h>
 
@@ -70,8 +69,8 @@ struct rdma_open_dev_attr {
  *
  * returns: a pointer to a rdma_device object or NULL on error
  */
-struct rdma_device *rdma_open_device_target(struct rdma_open_dev_attr *open_dev_attr); /* client */
-struct rdma_device *rdma_open_device_source(struct rdma_open_dev_attr *open_dev_attr); /* server */
+struct rdma_device *rdma_open_device_target(struct sockaddr *addr); /* client */
+struct rdma_device *rdma_open_device_source(struct sockaddr *addr); /* server */
 
 /*
  * Close and release all rdma_device resources

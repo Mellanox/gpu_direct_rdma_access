@@ -38,6 +38,13 @@ extern "C" {
 #endif
 
 /*
+ * Convert IP address from string to sockaddr
+ *
+ * returns: 0 on success or 1 on error
+ */
+int get_addr(char *dst, struct sockaddr *addr);
+
+/*
  * Print program run time.
  *
  * returns: 0 on success or 1 on error

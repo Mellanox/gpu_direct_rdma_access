@@ -32,16 +32,35 @@
 
 #define _GNU_SOURCE
 #include <stdio.h>
-//#include <stdlib.h>
-//#include <unistd.h>
-//#include <string.h>
-//#include <sys/types.h>
-//#include <sys/time.h>
-//#include <netdb.h>
-//#include <malloc.h>
 #include <time.h>
+#include <netdb.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 
 #include "utils.h"
+
+int get_addr(char *dst, struct sockaddr *addr)
+{
+        struct addrinfo *res;
+        int ret;
+
+        ret = getaddrinfo(dst, NULL, NULL, &res);
+        if (ret) {
+                printf("getaddrinfo failed (%s) - invalid hostname or IP address\n", gai_strerror(ret));
+                return ret;
+        }
+
+        if (res->ai_family == PF_INET)
+                memcpy(addr, res->ai_addr, sizeof(struct sockaddr_in));
+        else if (res->ai_family == PF_INET6)
+                memcpy(addr, res->ai_addr, sizeof(struct sockaddr_in6));
+        else
+                ret = -1;
+
+        freeaddrinfo(res);
+        return ret;
+}
 
 int print_run_time(struct timeval start, unsigned long size, int iters)
 {
