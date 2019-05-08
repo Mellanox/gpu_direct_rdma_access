@@ -192,8 +192,8 @@ static struct ibv_context *open_ib_device_by_addr(struct rdma_device *rdma_dev, 
 
 	rdma_dev->ib_port = rdma_dev->cm_id->port_num;
 
-	DEBUG_LOG("Bound to RDMA device, at <%s, %d>, name:%s, port\n",
-		str, ntohs(sin_port), rdma_dev->cm_id->verbs->device->name, rdma_dev->cm_id->port_num);
+	DEBUG_LOG("bound to RDMA device name:%s, port:%d, based on '%s'\n",
+		rdma_dev->cm_id->verbs->device->name, rdma_dev->cm_id->port_num, str); 
 
 	return rdma_dev->cm_id->verbs;
 
@@ -203,6 +203,36 @@ out1:
         rdma_destroy_event_channel(rdma_dev->cm_channel);
         return NULL;
 
+}
+
+static void close_ib_device(struct rdma_device *rdma_dev)
+{
+    int ret;
+
+    if (rdma_dev->cm_channel) {
+
+        /* if we are using RDMA_CM then we just referance the cma's ibv_context */
+	rdma_dev->context = NULL;
+
+        if (rdma_dev->cm_id) {
+            DEBUG_LOG("rdma_destroy_id(%p)\n", rdma_dev->cm_id);
+            ret = rdma_destroy_id(rdma_dev->cm_id);
+            if (ret) {
+                fprintf(stderr, "failure in rdma_destroy_id(), error %d\n", ret);
+            }
+        }
+
+        DEBUG_LOG("rdma_destroy_event_channel(%p)\n", rdma_dev->cm_id);
+        rdma_destroy_event_channel(rdma_dev->cm_channel);
+    }
+
+    if (rdma_dev->context) {
+        DEBUG_LOG("ibv_close_device(%p)\n", rdma_dev->context);
+        ret = ibv_close_device(rdma_dev->context);
+        if (ret) {
+            fprintf(stderr, "failure in ibv_close_device(), error %d\n", ret);
+        }
+    }
 }
 
 /***********************************************************************************
@@ -483,9 +513,7 @@ clean_pd:
     }
 
 clean_device:
-    if (rdma_dev->context) {
-        ibv_close_device(rdma_dev->context);
-    }
+    close_ib_device(rdma_dev);
     
 clean_rdma_dev:
     free(rdma_dev);
@@ -630,9 +658,7 @@ clean_pd:
     }
 
 clean_device:
-    if (rdma_dev->context) {
-        ibv_close_device(rdma_dev->context);
-    }
+    close_ib_device(rdma_dev);
 
 clean_rdma_dev:
     free(rdma_dev);
@@ -680,12 +706,7 @@ void rdma_close_device(struct rdma_device *rdma_dev)
         return;
     }
 
-    DEBUG_LOG("ibv_close_device(%p)\n", rdma_dev->context);
-    ret_val = ibv_close_device(rdma_dev->context);
-    if (ret_val) {
-        fprintf(stderr, "Couldn't release context, error %d\n", ret_val);
-        return;
-    }
+    close_ib_device(rdma_dev);
 
     free(rdma_dev);
 

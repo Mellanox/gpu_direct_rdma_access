@@ -214,6 +214,7 @@ int main(int argc, char *argv[])
     struct user_params      usr_par;
     int                     ret_val = 0;
     int                     sockfd;
+    void                   *buff;
 
     srand48(getpid() * time(NULL));
 
@@ -222,13 +223,6 @@ int main(int argc, char *argv[])
         return ret_val;
     }
 
-    printf("Listening to remote client...\n");
-    sockfd = open_server_socket(usr_par.port);
-    if (sockfd < 0) {
-        return 1;
-    }
-    printf("Connection accepted.\n");
-
     rdma_dev = rdma_open_device_source(&usr_par.hostaddr); /* server */
     if (!rdma_dev) {
         ret_val = 1;
@@ -236,8 +230,6 @@ int main(int argc, char *argv[])
     }
     
     /* Local memory buffer allocation */
-    void    *buff;
-    
     buff = work_buffer_alloc(usr_par.size, 0 /*use_cuda*/);
             /* On the server side, we allocate buffer on CPU and not on GPU */
     if (!buff) {
@@ -252,6 +244,13 @@ int main(int argc, char *argv[])
         ret_val = 1;
         goto clean_mem_buff;
     }
+
+    printf("Listening to remote client...\n");
+    sockfd = open_server_socket(usr_par.port);
+    if (sockfd < 0) {
+        return 1;
+    }
+    printf("Connection accepted.\n");
 
     if (gettimeofday(&start, NULL)) {
         perror("gettimeofday");
