@@ -33,19 +33,9 @@
 #ifndef _UTILS_H_
 #define _UTILS_H_
 
-/* This file defines `enum ibv_mtu'  */
-#include <infiniband/verbs.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/*
- * Convert MTU integer value to enum ibv_mtu.
- *
- * returns: enum ibv_mtu corresponding to the given MTU or -1 on error
- */
-enum ibv_mtu mtu_to_enum(int mtu);
 
 /*
  * Print program run time.

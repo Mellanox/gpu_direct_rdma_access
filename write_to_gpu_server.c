@@ -64,7 +64,6 @@ struct user_params {
     int                  ib_port;
     unsigned long        size;
     char                *ib_devname;
-    enum ibv_mtu         mtu;
     int                  iters;
     int                  gidx;
 };
@@ -142,7 +141,6 @@ static void usage(const char *argv0)
     printf("  -d, --ib-dev=<dev>        use IB device <dev> (the flag is mandatory)\n");
     printf("  -i, --ib-port=<port>      use port <port> of IB device (default 1)\n");
     printf("  -s, --size=<size>         size of message to exchange (default 4096)\n");
-    printf("  -m, --mtu=<size>          path MTU (default 1024)\n");
     printf("  -n, --iters=<iters>       number of exchanges (default 1000)\n");
     printf("  -g, --gid-idx=<gid index> local port gid index\n");
     printf("  -D, --debug-mask=<mask>   debug bitmask: bit 0 - debug print enable,"
@@ -156,7 +154,6 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
     usr_par->port       = 18515;
     usr_par->ib_port    = 1;
     usr_par->size       = 4096;
-    usr_par->mtu        = IBV_MTU_1024;
     usr_par->iters      = 1000;
     usr_par->gidx       = -1;
 
@@ -168,7 +165,6 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             { .name = "ib-dev",        .has_arg = 1, .val = 'd' },
             { .name = "ib-port",       .has_arg = 1, .val = 'i' },
             { .name = "size",          .has_arg = 1, .val = 's' },
-            { .name = "mtu",           .has_arg = 1, .val = 'm' },
             { .name = "iters",         .has_arg = 1, .val = 'n' },
             { .name = "gid-idx",       .has_arg = 1, .val = 'g' },
             { .name = "debug-mask",    .has_arg = 1, .val = 'D' },
@@ -211,14 +207,6 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
 
         case 's':
             usr_par->size = strtol(optarg, NULL, 0);
-            break;
-
-        case 'm':
-            usr_par->mtu = mtu_to_enum(strtol(optarg, NULL, 0));
-            if (usr_par->mtu < 0) {
-                usage(argv[0]);
-                return 1;
-            }
             break;
 
         case 'n':
@@ -278,7 +266,6 @@ int main(int argc, char *argv[])
         .ib_devname = usr_par.ib_devname,
         .ib_port    = usr_par.ib_port,
         .gidx       = usr_par.gidx,
-        .mtu        = usr_par.mtu
     };
     rdma_dev = rdma_open_device_source(&open_dev_attr); /* server */
     if (usr_par.ib_devname) {

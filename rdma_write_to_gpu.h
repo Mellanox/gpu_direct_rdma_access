@@ -58,7 +58,6 @@ struct rdma_open_dev_attr {
     const char      *ib_devname;
     int             ib_port;
     int             gidx;
-    enum ibv_mtu    mtu;
 };
 /*
  * Open a RDMA device and allocated requiered resources.

@@ -43,18 +43,6 @@
 
 #include "utils.h"
 
-enum ibv_mtu mtu_to_enum(int mtu)
-{
-	switch (mtu) {
-	case 256:  return IBV_MTU_256;
-	case 512:  return IBV_MTU_512;
-	case 1024: return IBV_MTU_1024;
-	case 2048: return IBV_MTU_2048;
-	case 4096: return IBV_MTU_4096;
-	default:   return -1;
-	}
-}
-
 int print_run_time(struct timeval start, unsigned long size, int iters)
 {
     struct timeval  end;

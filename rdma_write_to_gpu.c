@@ -83,6 +83,7 @@ struct rdma_device {
     int                 gidx;
     union ibv_gid       gid;
     uint16_t            lid;
+    enum ibv_mtu        mtu;
 };
 
 struct rdma_buffer {
@@ -158,6 +159,8 @@ static int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev)
         return 1;
     }
 
+    rdma_dev->mtu = portinfo.active_mtu;
+
     rdma_dev->lid = portinfo.lid;
     if ((portinfo.link_layer != IBV_LINK_LAYER_ETHERNET) && (!portinfo.lid)) {
         fprintf(stderr, "Couldn't get local LID\n");
@@ -191,14 +194,14 @@ static int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev)
  * Modify target QP state to RTR (on the client side)
  * Return value: 0 - success, 1 - error
  ****************************************************************************************/
-static int modify_target_qp_to_rtr(struct rdma_device *rdma_dev, enum ibv_mtu mtu)
+static int modify_target_qp_to_rtr(struct rdma_device *rdma_dev)
 {
     struct ibv_qp_attr      qp_attr;
     enum ibv_qp_attr_mask   attr_mask;
 
     memset(&qp_attr, 0, sizeof qp_attr);
     qp_attr.qp_state       = IBV_QPS_RTR;
-    qp_attr.path_mtu       = mtu;
+    qp_attr.path_mtu       = rdma_dev->mtu;
     qp_attr.min_rnr_timer  = 16;
     qp_attr.ah_attr.port_num    = rdma_dev->ib_port;
 
@@ -227,7 +230,7 @@ static int modify_target_qp_to_rtr(struct rdma_device *rdma_dev, enum ibv_mtu mt
  * Modify source QP state to RTR and then to RTS (on the server side)
  * Return value: 0 - success, 1 - error
  ****************************************************************************************/
-static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ibv_mtu mtu)
+static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev)
 {
     struct ibv_qp_attr      qp_attr;
     enum ibv_qp_attr_mask   attr_mask;
@@ -236,7 +239,7 @@ static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev, enum ib
     
     /* - - - - - - -  Modify QP to RTR  - - - - - - - */
     qp_attr.qp_state = IBV_QPS_RTR;
-    qp_attr.path_mtu = mtu;
+    qp_attr.path_mtu = rdma_dev->mtu;
     qp_attr.ah_attr.port_num = rdma_dev->ib_port;
 
     if (rdma_dev->gid.global.interface_id) {
@@ -391,7 +394,7 @@ struct rdma_device *rdma_open_device_target(struct rdma_open_dev_attr *open_dev_
         goto clean_qp;
     }
 
-    ret_val = modify_target_qp_to_rtr(rdma_dev, open_dev_attr->mtu);
+    ret_val = modify_target_qp_to_rtr(rdma_dev);
     if (ret_val) {
         goto clean_qp;
     }
@@ -548,7 +551,7 @@ struct rdma_device *rdma_open_device_source(struct rdma_open_dev_attr *open_dev_
         goto clean_qp;
     }
 
-    ret_val = modify_source_qp_to_rtr_and_rts(rdma_dev, open_dev_attr->mtu);
+    ret_val = modify_source_qp_to_rtr_and_rts(rdma_dev);
     if (ret_val) {
         goto clean_qp;
     }
