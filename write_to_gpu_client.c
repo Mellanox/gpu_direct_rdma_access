@@ -58,12 +58,13 @@ extern int debug_fast_path;
 
 struct user_params {
 
-    int                  port;
-    unsigned long        size;
-    int                  iters;
-    int                  use_cuda;
-    char                *servername;
-    struct sockaddr      hostaddr;
+    int                 port;
+    unsigned long       size;
+    int                 iters;
+    int                 use_cuda;
+    char               *bdf;
+    char               *servername;
+    struct sockaddr     hostaddr;
 };
 
 /****************************************************************************************
@@ -126,8 +127,9 @@ static void usage(const char *argv0)
     printf("  -p, --port=<port>         listen on/connect to port <port> (default 18515)\n");
     printf("  -s, --size=<size>         size of message to exchange (default 4096)\n");
     printf("  -n, --iters=<iters>       number of exchanges (default 1000)\n");
-    printf("  -u, --use-cuda            use CUDA pacage (work with GPU memoty)\n");
-    printf("  -D, --debug-mask=<mask>   debug bitmask: bit 0 - debug print enable,"
+    printf("  -u, --use-cuda=<BDF>      use CUDA pacage (work with GPU memoty),\n"
+           "                            BDF corresponding to CUDA device, for example, \"0000:3e:02.0\"\n");
+    printf("  -D, --debug-mask=<mask>   debug bitmask: bit 0 - debug print enable,\n"
            "                                           bit 1 - fast path debug print enable\n");
 }
 
@@ -147,12 +149,12 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             { .name = "port",          .has_arg = 1, .val = 'p' },
             { .name = "size",          .has_arg = 1, .val = 's' },
             { .name = "iters",         .has_arg = 1, .val = 'n' },
-            { .name = "use-cuda",      .has_arg = 0, .val = 'u' },
+            { .name = "use-cuda",      .has_arg = 1, .val = 'u' },
             { .name = "debug-mask",    .has_arg = 1, .val = 'D' },
             { 0 }
         };
 
-        c = getopt_long(argc, argv, "a:p:s:m:n:uD:",
+        c = getopt_long(argc, argv, "a:p:s:n:u:D:",
                         long_options, NULL);
         if (c == -1)
             break;
@@ -181,6 +183,12 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
 
         case 'u':
             usr_par->use_cuda = 1;
+            usr_par->bdf = calloc(1, strlen(optarg)+1);
+            if (!usr_par->bdf){
+                perror("BDF mem alloc failure");
+                return 1;
+            }
+            strcpy(usr_par->bdf, optarg);
             break;
         
         case 'D':
@@ -228,13 +236,17 @@ int main(int argc, char *argv[])
 
     ret_val = parse_command_line(argc, argv, &usr_par);
     if (ret_val) {
-        return ret_val;
+        ret_val = 1;
+        /* We don't exit here, because when parse_command_line failed, probably
+           some of memory allocations were completed, so we need to free them */
+        goto clean_usr_par;
     }
     
     if (!usr_par.hostaddr.sa_family) {
         fprintf(stderr, "host ip address is missing in the command line.");
         usage(argv[0]);
-        return 1;
+        ret_val = 1;
+        goto clean_usr_par;
     }
 
     printf("Connecting to remote server \"%s\"\n", usr_par.servername);
@@ -242,9 +254,9 @@ int main(int argc, char *argv[])
     free(usr_par.servername);
 
     if (sockfd < 0) {
-        return 1;
+        ret_val = 1;
+        goto clean_usr_par;
     }
-
     rdma_dev = rdma_open_device_target(&usr_par.hostaddr); /* client */
     if (!rdma_dev) {
         ret_val = 1;
@@ -253,11 +265,18 @@ int main(int argc, char *argv[])
     
     /* CPU or GPU memory buffer allocation */
     void    *buff;
-    buff = work_buffer_alloc(usr_par.size, usr_par.use_cuda);
+    buff = work_buffer_alloc(usr_par.size, usr_par.use_cuda, usr_par.bdf);
     if (!buff) {
         ret_val = 1;
         goto clean_device;
     }
+    
+    /* We don't need bdf any more, sio we can free this. */
+    if (usr_par.bdf) {
+        free(usr_par.bdf);
+        usr_par.bdf = NULL;
+    }
+    
     /* RDMA buffer registration */
     struct rdma_buffer *rdma_buff;
 
@@ -331,6 +350,11 @@ clean_device:
 
 clean_socket:
     close(sockfd);
+
+clean_usr_par:
+    if (usr_par.bdf) {
+        free(usr_par.bdf);
+    }
 
     return ret_val;
 }

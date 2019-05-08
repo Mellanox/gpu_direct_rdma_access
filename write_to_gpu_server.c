@@ -60,10 +60,11 @@ extern int debug_fast_path;
 
 struct user_params {
 
-    int                  port;
-    unsigned long        size;
-    int                  iters;
-    struct sockaddr      hostaddr;
+    int                 port;
+    unsigned long       size;
+    int                 iters;
+    int                 num_sges;
+    struct sockaddr     hostaddr;
 };
 
 /****************************************************************************************
@@ -139,7 +140,8 @@ static void usage(const char *argv0)
     printf("  -p, --port=<port>         listen on/connect to port <port> (default 18515)\n");
     printf("  -s, --size=<size>         size of message to exchange (default 4096)\n");
     printf("  -n, --iters=<iters>       number of exchanges (default 1000)\n");
-    printf("  -D, --debug-mask=<mask>   debug bitmask: bit 0 - debug print enable,"
+    printf("  -l, --sg_list-len=<length> number of sge-s to send in sg_list (default 0 - old mode)\n");
+    printf("  -D, --debug-mask=<mask>   debug bitmask: bit 0 - debug print enable,\n"
            "                                           bit 1 - fast path debug print enable\n");
 }
 
@@ -159,12 +161,13 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             { .name = "port",          .has_arg = 1, .val = 'p' },
             { .name = "size",          .has_arg = 1, .val = 's' },
             { .name = "iters",         .has_arg = 1, .val = 'n' },
+            { .name = "sg_list-len",   .has_arg = 1, .val = 'l' },
             { .name = "debug-mask",    .has_arg = 1, .val = 'D' },
             { 0 }
         };
 
-        c = getopt_long(argc, argv, "a:p:s:m:n:D:",
-                long_options, NULL);
+        c = getopt_long(argc, argv, "a:p:s:n:l:D:",
+                        long_options, NULL);
         
         if (c == -1)
             break;
@@ -185,6 +188,10 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
 
         case 'n':
             usr_par->iters = strtol(optarg, NULL, 0);
+            break;
+
+        case 'l':
+            usr_par->num_sges = strtol(optarg, NULL, 0);
             break;
 
         case 'D':
@@ -210,7 +217,7 @@ int main(int argc, char *argv[])
 {
     struct rdma_device     *rdma_dev;
     struct timeval          start;
-    int                     scnt = 0;
+    int                     cnt = 0;
     struct user_params      usr_par;
     int                     ret_val = 0;
     int                     sockfd;
@@ -238,7 +245,7 @@ int main(int argc, char *argv[])
     /* Local memory buffer allocation */
     void    *buff;
     
-    buff = work_buffer_alloc(usr_par.size, 0 /*use_cuda*/);
+    buff = work_buffer_alloc(usr_par.size, 0 /*use_cuda*/, NULL);
             /* On the server side, we allocate buffer on CPU and not on GPU */
     if (!buff) {
         ret_val = 1;
@@ -262,19 +269,20 @@ int main(int argc, char *argv[])
     /****************************************************************************************************
      * The main loop where we client and server send and receive "iters" number of messages
      */
-    scnt = 0;
-    while (scnt < usr_par.iters) {
+    for (cnt = 0; cnt < usr_par.iters; cnt++) {
 
-        int  r_size;
-        char desc_str[sizeof "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10"];
-        char ackmsg[sizeof "rdma_write completed"];
+        int     r_size;
+        char    desc_str[sizeof "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10"];
+        char    ackmsg[sizeof "rdma_write completed"];
         struct rdma_write_attr  write_attr;
+        int     i;
+        int     expected_comp_events = usr_par.num_sges? (usr_par.num_sges+MAX_SEND_SGE-1)/MAX_SEND_SGE: 1;
 
         /* Receiving RDMA data (address, size, rkey etc.) from socket as a triger to start RDMA write operation */
-        DEBUG_LOG_FAST_PATH("Iteration %d: Waiting to Receive message of size %d\n", scnt, sizeof desc_str);
+        DEBUG_LOG_FAST_PATH("Iteration %d: Waiting to Receive message of size %d\n", cnt, sizeof desc_str);
         r_size = recv(sockfd, desc_str, sizeof desc_str, MSG_WAITALL);
         if (r_size != sizeof desc_str) {
-            fprintf(stderr, "Couldn't receive RDMA data for iteration %d\n", scnt);
+            fprintf(stderr, "Couldn't receive RDMA data for iteration %d\n", cnt);
             ret_val = 1;
             goto clean_rdma_buff;
         }
@@ -283,24 +291,42 @@ int main(int argc, char *argv[])
         write_attr.remote_buf_desc_str      = desc_str;
         write_attr.remote_buf_desc_length   = sizeof desc_str;
         write_attr.local_buf_rdma           = rdma_buff;
-        write_attr.wr_id                    = scnt;
+        write_attr.wr_id                    = cnt * expected_comp_events;
 
         /* Executing RDMA write */
-        SDEBUG_LOG_FAST_PATH ((char*)buff, "Write iteration N %d", scnt);
+        SDEBUG_LOG_FAST_PATH ((char*)buff, "Write iteration N %d", cnt);
+        /* Prepare send sg_list */
+        if (usr_par.num_sges) {
+            if (usr_par.num_sges > 100) {
+                fprintf(stderr, "num_sges %d is too big\n", usr_par.num_sges);
+                ret_val = 1;
+                goto clean_rdma_buff;
+            }
+            struct iovec buf_iovec[100];
+            memset(buf_iovec, 0, sizeof buf_iovec);
+            write_attr.local_buf_iovcnt = usr_par.num_sges;
+            write_attr.local_buf_iovec  = buf_iovec;
+
+            size_t  portion_size;
+            portion_size = (usr_par.size / usr_par.num_sges) & 0xFFFFFFF8; /*8 alighned*/
+            for (i = 0; i < usr_par.num_sges; i++) {
+                buf_iovec[i].iov_base = buff + (i * portion_size);
+                buf_iovec[i].iov_len  = portion_size;
+            }
+        }
         ret_val = rdma_write_to_peer(&write_attr);
         if (ret_val) {
             goto clean_rdma_buff;
         }
         
         /* Completion queue polling loop */
-        struct rdma_completion_event rdma_comp_ev[10];
-        int    reported_ev, i;
-        
         DEBUG_LOG_FAST_PATH("Polling completion queue\n");
+        struct rdma_completion_event rdma_comp_ev[10];
+        int    reported_ev  = 0;
         do {
-            reported_ev = rdma_poll_completions(rdma_dev, rdma_comp_ev, 10);
+            reported_ev += rdma_poll_completions(rdma_dev, &rdma_comp_ev[reported_ev], 10-reported_ev);
             //TODO - we can put sleep here
-        } while (reported_ev < 1);
+        } while (reported_ev < expected_comp_events);
         DEBUG_LOG_FAST_PATH("Finished polling\n");
 
         for (i = 0; i < reported_ev; ++i) {
@@ -312,12 +338,12 @@ int main(int argc, char *argv[])
                 goto clean_rdma_buff;
             }
         }
-        scnt += reported_ev;
 
         // Sending ack-message to the client, confirming that RDMA write has been completet
         if (write(sockfd, "rdma_write completed", sizeof("rdma_write completed")) != sizeof("rdma_write completed")) {
             fprintf(stderr, "Couldn't send \"rdma_write completed\" msg\n");
-            return 1;
+            ret_val = 1;
+            goto clean_rdma_buff;
         }
     }
     /****************************************************************************************************/

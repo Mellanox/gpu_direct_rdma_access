@@ -64,7 +64,6 @@ int debug_fast_path = 0;
 
 #define CQ_DEPTH        8
 #define SEND_Q_DEPTH    64
-#define MAX_SEND_SGE    20
 #define DC_KEY          0xffeeddcc  /*this is defined for both sides: client and server*/
 
 #define mmin(a, b)      a < b ? a : b
@@ -103,6 +102,86 @@ struct rdma_buffer {
     /* Linked rdma_device */
     struct rdma_device *rdma_dev;
 };
+
+//============================================================================================
+struct rdma_ah_key {
+    union ibv_gid   dgid;
+    uint16_t        dlid;
+    uint8_t         port_num;
+    uint8_t         sgid_index;
+};
+
+struct rdma_ah_hash_element {
+    struct rdma_ah_key  ah_key;
+    struct ibv_ah      *ah;
+};
+
+static struct rdma_ah_hash_element  ah_hash_elem = {
+    .ah_key = {
+        .dgid = {
+            .raw = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+        },
+        .dlid = 0,
+        .port_num   = 0,
+        .sgid_index = 0
+    },
+    .ah = NULL
+};
+
+static struct ibv_ah *rdma_get_ah_from_hash(struct rdma_ah_key *ah_key, int is_global, struct ibv_pd *pd)
+{
+    //For debug
+    DEBUG_LOG_FAST_PATH("hash elem ah_key: %016llx %016llx %04hx %02x %02x\n",
+                        ah_hash_elem.ah_key.dgid.global.subnet_prefix,
+                        ah_hash_elem.ah_key.dgid.global.interface_id,
+                        ah_hash_elem.ah_key.dlid, ah_hash_elem.ah_key.port_num,
+                        ah_hash_elem.ah_key.sgid_index);
+    DEBUG_LOG_FAST_PATH("the given ah_key: %016llx %016llx %04hx %02x %02x\n",
+                        ah_key->dgid.global.subnet_prefix, ah_key->dgid.global.interface_id,
+                        ah_key->dlid, ah_key->port_num, ah_key->sgid_index);
+
+    if (!memcmp(&ah_hash_elem.ah_key, ah_key, sizeof ah_hash_elem.ah_key)) {
+        return ah_hash_elem.ah;
+    }
+    /* Allocate new ah and save this in the hash */
+    if (ah_hash_elem.ah) {
+        /* The hash table is full, can't allocate new element */
+        return NULL;
+    }
+
+    struct ibv_ah_attr  ah_attr;
+    
+    memset(&ah_attr, 0, sizeof ah_attr);
+    ah_attr.is_global   = is_global;
+    ah_attr.dlid        = ah_key->dlid;
+    ah_attr.port_num    = ah_key->port_num;
+
+    if (ah_attr.is_global) {
+        ah_attr.grh.hop_limit  = 1;
+        ah_attr.grh.dgid       = ah_key->dgid;
+        ah_attr.grh.sgid_index = ah_key->sgid_index;
+    }
+    ah_hash_elem.ah = ibv_create_ah(pd, &ah_attr);
+    if (!ah_hash_elem.ah) {
+        perror("ibv_create_ah");
+        return NULL;
+    }
+    memcpy(&ah_hash_elem.ah_key, ah_key, sizeof ah_hash_elem.ah_key);
+    return ah_hash_elem.ah;
+}
+
+static int rdma_free_ah_in_hash(void)
+{
+    if (ah_hash_elem.ah){
+        int ret_val = ibv_destroy_ah(ah_hash_elem.ah);
+        if (ret_val) {
+            perror("ibv_destroy_ah");
+            return ret_val;
+        }
+        ah_hash_elem.ah = NULL;
+    }
+    return 0;
+}
 
 //============================================================================================
 static struct ibv_context *open_ib_device_by_name(const char *ib_dev_name)
@@ -673,6 +752,13 @@ void rdma_close_device(struct rdma_device *rdma_dev)
         return;
     }
 
+    DEBUG_LOG("Free address handlers\n", rdma_dev->pd);
+    ret_val = rdma_free_ah_in_hash();
+    if (ret_val) {
+        fprintf(stderr, "Couldn't destroy ah, error %d\n", ret_val);
+        return;
+    }
+
     DEBUG_LOG("ibv_dealloc_pd(%p)\n", rdma_dev->pd);
     ret_val = ibv_dealloc_pd(rdma_dev->pd);
     if (ret_val) {
@@ -802,7 +888,6 @@ int rdma_buffer_get_desc_str(struct rdma_buffer *rdma_buff, char *desc_str, size
 }
 
 //============================================================================================
-static struct ibv_ah    *ah = NULL;
 int rdma_write_to_peer(struct rdma_write_attr *attr)
 {
     unsigned long long  rem_buf_addr = 0;
@@ -823,18 +908,17 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
         "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10"*/
     sscanf(attr->remote_buf_desc_str, "%llx:%lx:%lx:%hx:%lx:%d",
            &rem_buf_addr, &rem_buf_size, &rem_buf_rkey, &rem_lid, &rem_dctn, &is_global);
-    DEBUG_LOG_FAST_PATH("rem_buf_addr = 0x%llx, rem_buf_size = 0x%x, rem_buf_rkey = 0x%x, rem_lid = 0x%x, rem_dctn = 0x%x, is_global = %d\n",
-                        rem_buf_addr, rem_buf_size, rem_buf_rkey, rem_lid, (uint16_t)rem_dctn, is_global);
-
     memset(&rem_gid, 0, sizeof rem_gid);
     if (is_global) {
         wire_gid_to_gid(attr->remote_buf_desc_str + sizeof "0102030405060708:01020304:01020304:0102:010203:1", &rem_gid);
     }
-    DEBUG_LOG_FAST_PATH ("Rem GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
-                         rem_gid.raw[0],  rem_gid.raw[1],  rem_gid.raw[2],  rem_gid.raw[3],
-                         rem_gid.raw[4],  rem_gid.raw[5],  rem_gid.raw[6],  rem_gid.raw[7], 
-                         rem_gid.raw[8],  rem_gid.raw[9],  rem_gid.raw[10], rem_gid.raw[11],
-                         rem_gid.raw[12], rem_gid.raw[13], rem_gid.raw[14], rem_gid.raw[15] );
+    DEBUG_LOG_FAST_PATH("rem_buf_addr = 0x%llx, rem_buf_size = 0x%x, rem_buf_rkey = 0x%x, rem_lid = 0x%x, rem_dctn = 0x%x, is_global = %d\n",
+                        rem_buf_addr, rem_buf_size, rem_buf_rkey, rem_lid, (uint16_t)rem_dctn, is_global);
+    DEBUG_LOG_FAST_PATH("Rem GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
+                        rem_gid.raw[0],  rem_gid.raw[1],  rem_gid.raw[2],  rem_gid.raw[3],
+                        rem_gid.raw[4],  rem_gid.raw[5],  rem_gid.raw[6],  rem_gid.raw[7], 
+                        rem_gid.raw[8],  rem_gid.raw[9],  rem_gid.raw[10], rem_gid.raw[11],
+                        rem_gid.raw[12], rem_gid.raw[13], rem_gid.raw[14], rem_gid.raw[15] );
 
     /*
      * Pass attr->local_buf_iovec - local_buf_iovcnt elements and check that
@@ -842,32 +926,36 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
      */
     int     i;
     int     total_len = 0;
-    for (i = 0; i < attr->local_buf_iovcnt; i++) {
-        if ((attr->local_buf_iovec[i].iov_base < attr->local_buf_rdma->buf_addr) ||
-            (attr->local_buf_iovec[i].iov_base + attr->local_buf_iovec[i].iov_len >
-             attr->local_buf_rdma->buf_addr + attr->local_buf_rdma->buf_size)) {
-
-            fprintf(stderr, "sge buffer %d (%p, %p) exceeds the local buffer bounary (%p, %p)\n", i,
-                    attr->local_buf_iovec[i].iov_base, attr->local_buf_iovec[i].iov_base + attr->local_buf_iovec[i].iov_len,
-                    attr->local_buf_rdma->buf_addr, attr->local_buf_rdma->buf_addr + attr->local_buf_rdma->buf_size);
-            return 1;
+    /* We do these validation code in debug mode only, because if something
+       is wrong in the fast path, the HW will give completion error */
+    if (debug_fast_path) {
+        for (i = 0; i < attr->local_buf_iovcnt; i++) {
+            if ((attr->local_buf_iovec[i].iov_base < attr->local_buf_rdma->buf_addr) ||
+                (attr->local_buf_iovec[i].iov_base + attr->local_buf_iovec[i].iov_len >
+                 attr->local_buf_rdma->buf_addr + attr->local_buf_rdma->buf_size)) {
+    
+                fprintf(stderr, "sge buffer %d (%p, %p) exceeds the local buffer bounary (%p, %p)\n", i,
+                        attr->local_buf_iovec[i].iov_base, attr->local_buf_iovec[i].iov_base + attr->local_buf_iovec[i].iov_len,
+                        attr->local_buf_rdma->buf_addr, attr->local_buf_rdma->buf_addr + attr->local_buf_rdma->buf_size);
+                return 1;
+            }
+            total_len += attr->local_buf_iovec[i].iov_len;
+            if (total_len > rem_buf_size) {
+                fprintf(stderr, "The sum of sge buffers lengths (%d) exceeded the remote buffer size %d on iteration %d\n",
+                        total_len, rem_buf_size, i);
+                return 1;
+            }
         }
-        total_len += attr->local_buf_iovec[i].iov_len;
-        if (total_len > rem_buf_size) {
-            fprintf(stderr, "The sum of sge buffers lengths (%d) exceeded the remote buffer size %d on iteration %d\n",
+        if ((attr->local_buf_iovcnt) && (total_len != rem_buf_size)) {
+            fprintf(stderr, "The sum of sge buffers lengths (%d) differs from the remote buffer size %d\n",
                     total_len, rem_buf_size, i);
             return 1;
         }
-    }
-    if ((attr->local_buf_iovcnt) && (total_len != rem_buf_size)) {
-        fprintf(stderr, "The sum of sge buffers lengths (%d) differs from the remote buffer size %d\n",
-                total_len, rem_buf_size, i);
-        return 1;
-    }
-    if ((!attr->local_buf_iovcnt) && (rem_buf_size > attr->local_buf_rdma->buf_size)) {
-        fprintf(stderr, "When not using sge list, the requested buffer size %u is greater than allocated local size %u\n",
-                rem_buf_size, attr->local_buf_rdma->buf_size);
-        return 1;
+        if ((!attr->local_buf_iovcnt) && (rem_buf_size > attr->local_buf_rdma->buf_size)) {
+            fprintf(stderr, "When not using sge list, the requested buffer size %u is greater than allocated local size %u\n",
+                    rem_buf_size, attr->local_buf_rdma->buf_size);
+            return 1;
+        }
     }
     
     /* RDMA Write for DCI connect, this will create cqe->ts_start */
@@ -876,75 +964,78 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     rdma_dev->qpex->wr_id = attr->wr_id;
     rdma_dev->qpex->wr_flags = IBV_SEND_SIGNALED;
 
-    DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
-                        rdma_dev->qpex, rem_buf_rkey, (unsigned long long)rem_buf_addr);
-    ibv_wr_rdma_write(rdma_dev->qpex, rem_buf_rkey, rem_buf_addr);
+    /* Check if address handler corresponding to the given key is present in the hash table,
+       if yes - return it and if it is not, create ah and add it to the hash table */
+    // TODO - full implementation
+    // In the current implementation we just have one ah element in the hash table
+    struct rdma_ah_key ah_key = {
+        .port_num   = rdma_dev->ib_port,
+        .sgid_index = rdma_dev->gidx,
+        .dlid       = rem_lid,
+        .dgid       = rem_gid
+    };
 
-    /* Check if address handler (ah) is present in the hash, if not, create ah */
-    // TODO...
-    struct ibv_ah_attr  ah_attr;
-    //struct ibv_ah       *ah;
-    
-    memset(&ah_attr, 0, sizeof ah_attr);
-    ah_attr.is_global   = is_global;
-    ah_attr.dlid        = rem_lid;
-    ah_attr.port_num    = rdma_dev->ib_port;
-
-    if (ah_attr.is_global) {
-        ah_attr.grh.hop_limit = 1;
-        ah_attr.grh.dgid = rem_gid;
-        ah_attr.grh.sgid_index = rdma_dev->gidx;
-    }
+    struct ibv_ah *ah = rdma_get_ah_from_hash(&ah_key, is_global, rdma_dev->pd);
     if (!ah) {
-        ah = ibv_create_ah(rdma_dev->pd, &ah_attr);
-        if (!ah) {
-            perror("ibv_create_ah");
-            return 1;
-        }
+        fprintf(stderr, "Couldn't get address handler\n");
+        return 1;
     }
     
-    DEBUG_LOG_FAST_PATH("RDMA Write: mlx5dv_wr_set_dc_addr: mqpex = %p, ah = %p, rem_dctn = 0x%06x\n",
-                        rdma_dev->mqpex, ah, rem_dctn);
-    mlx5dv_wr_set_dc_addr(rdma_dev->mqpex, ah, rem_dctn, DC_KEY);
+    int     ret_val;
     
     if (attr->local_buf_iovcnt) {
-        int     num_sges_to_send = attr->local_buf_iovcnt,
-                start_i = 0;
+        uint64_t curr_rem_addr = (uint64_t)rem_buf_addr;
+        int      num_sges_to_send = attr->local_buf_iovcnt,
+                 start_i = 0;
         struct ibv_sge sg_list[MAX_SEND_SGE];
 
         while (num_sges_to_send > 0) {
+            DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
+                                rdma_dev->qpex, rem_buf_rkey, curr_rem_addr);
+            ibv_wr_rdma_write(rdma_dev->qpex, rem_buf_rkey, curr_rem_addr);
+
+            DEBUG_LOG_FAST_PATH("RDMA Write: mlx5dv_wr_set_dc_addr: mqpex = %p, ah = %p, rem_dctn = 0x%06x\n",
+                                rdma_dev->mqpex, ah, rem_dctn);
+            mlx5dv_wr_set_dc_addr(rdma_dev->mqpex, ah, rem_dctn, DC_KEY);
+            
             int     curr_iovcnt;
             curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
             for (i = 0; i < curr_iovcnt; i++) {
                 sg_list[i].addr   = (uint64_t)attr->local_buf_iovec[start_i + i].iov_base;
                 sg_list[i].length = (uint32_t)attr->local_buf_iovec[start_i + i].iov_len;
                 sg_list[i].lkey   = (uint32_t)attr->local_buf_rdma->mr->lkey;
+                curr_rem_addr += sg_list[i].length;
             }
             DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge_list(qpex = %p, num_sge %u, sg_list %p), start_i %d, num_sges_to_send %d\n",
-                                rdma_dev->qpex, (size_t)curr_iovcnt, (void*)sg_list, num_sges_to_send);
+                                rdma_dev->qpex, (size_t)curr_iovcnt, (void*)sg_list, start_i, num_sges_to_send);
             ibv_wr_set_sge_list(rdma_dev->qpex, (size_t)curr_iovcnt, sg_list);
+            /* ring DB */
+            DEBUG_LOG_FAST_PATH("ibv_wr_complete: qpex = %p\n", rdma_dev->qpex);
+            ret_val = ibv_wr_complete(rdma_dev->qpex);
+            if (ret_val) {
+                return ret_val;
+            }
             num_sges_to_send -= curr_iovcnt;
             start_i += curr_iovcnt;
+            attr->wr_id++;
         }
     } else {
+        DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%x, remote buf 0x%llx\n",
+                            rdma_dev->qpex, rem_buf_rkey, (unsigned long long)rem_buf_addr);
+        ibv_wr_rdma_write(rdma_dev->qpex, rem_buf_rkey, rem_buf_addr);
+
+        DEBUG_LOG_FAST_PATH("RDMA Write: mlx5dv_wr_set_dc_addr: mqpex = %p, ah = %p, rem_dctn = 0x%06x\n",
+                            rdma_dev->mqpex, ah, rem_dctn);
+        mlx5dv_wr_set_dc_addr(rdma_dev->mqpex, ah, rem_dctn, DC_KEY);
+        
         DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
                             rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (unsigned long long)attr->local_buf_rdma->buf_addr, 1);
         ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (uintptr_t)attr->local_buf_rdma->buf_addr, (uint32_t)rem_buf_size);
+        /* ring DB */
+        DEBUG_LOG_FAST_PATH("ibv_wr_complete: qpex = %p\n", rdma_dev->qpex);
+        ret_val = ibv_wr_complete(rdma_dev->qpex);
     }
-
-    //TODO - in the current implementation when we are not using hash, we need to free ah
-    //int ret_val = ibv_destroy_ah(ah);
-    //if (ret_val) {
-    //    perror("ibv_destroy_ah");
-    //    return 1;
-    //}
-
-    /* ring DB */
-    DEBUG_LOG_FAST_PATH("ibv_wr_complete: qpex = %p\n", rdma_dev->qpex);
-    return ibv_wr_complete(rdma_dev->qpex);
-    // TODO: question: where should we use the following fields of struct rdma_write_attr:
-    //    struct iovec       *local_buf_iovec;
-    //    int                 local_buf_iovcnt; ???
+    return ret_val;
 }
 
 //============================================================================================
@@ -973,15 +1064,6 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
     for (i = 0; i < reported_entries; ++i) {
         event[i].wr_id  = wc[i].wr_id;
         event[i].status = wc[i].status; // or (wc[i].status == IBV_WC_SUCCESS)? RDMA_STATUS_SUCCESS: RDMA_STATUS_ERR_LAST
-    }
-    //MB - TODO
-    if (ah){
-        int ret_val = ibv_destroy_ah(ah);
-        if (ret_val) {
-            perror("ibv_destroy_ah");
-            return 1;
-        }
-        ah = NULL;
     }
     return reported_entries;
 }
