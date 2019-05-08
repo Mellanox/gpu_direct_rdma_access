@@ -58,16 +58,16 @@ extern int debug_fast_path;
 
 struct user_params {
 
-    int                  port;
-    int                  ib_port;
-    unsigned long        size;
-    char                *ib_devname;
-    enum ibv_mtu         mtu;
-    int                  iters;
-    int                  gidx;
-    int                  use_cuda;
-    char                *bdf;
-    char                *servername;
+    int                 port;
+    int                 ib_port;
+    unsigned long       size;
+    char               *ib_devname;
+    enum ibv_mtu        mtu;
+    int                 iters;
+    int                 gidx;
+    int                 use_cuda;
+    char               *bdf;
+    char               *servername;
 };
 
 /****************************************************************************************
