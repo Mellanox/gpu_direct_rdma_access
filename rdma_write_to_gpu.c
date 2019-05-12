@@ -51,6 +51,7 @@
 #include <rdma/rdma_cma.h>
 #include <infiniband/mlx5dv.h>
 
+#include "khash.h"
 #include "ibv_helper.h"
 #include "rdma_write_to_gpu.h"
 
@@ -69,7 +70,8 @@ int debug_fast_path = 0;
 
 #define mmin(a, b)      a < b ? a : b
 
-/* RDMA control buffer */
+KHASH_TYPE(kh_ib_ah, struct ibv_ah_attr, struct ibv_ah*);
+
 struct rdma_device {
 
     struct rdma_event_channel *cm_channel;
@@ -82,15 +84,19 @@ struct rdma_device {
     struct ibv_qp      *qp;
     struct ibv_qp_ex       *qpex;  /* DCI (server) only */
     struct mlx5dv_qp_ex    *mqpex; /* DCI (server) only */
-    int                 ib_port;
-    int                 rdma_buff_cnt;
     
     /* Address handler (port info) relateed fields */
+    int                 ib_port;
     int                 is_global;
     int                 gidx;
     union ibv_gid       gid;
     uint16_t            lid;
     enum ibv_mtu        mtu;
+
+    int                 rdma_buff_cnt;
+
+    /* AH hash */
+    khash_t(kh_ib_ah)   ah_hash;
 };
 
 struct rdma_buffer {
@@ -103,6 +109,27 @@ struct rdma_buffer {
     /* Linked rdma_device */
     struct rdma_device *rdma_dev;
 };
+
+
+/* use both gid + lid data for key generarion (lid - ib based, gid - RoCE) */
+static inline
+khint32_t kh_ib_ah_hash_func(struct ibv_ah_attr attr)
+{
+    return kh_int64_hash_func(attr.grh.dgid.global.subnet_prefix ^
+                              attr.grh.dgid.global.interface_id  ^
+                              attr.dlid);
+}
+
+static inline
+int kh_ib_ah_hash_equal(struct ibv_ah_attr a, struct ibv_ah_attr b)
+{
+    return !memcmp(&a, &b, sizeof(a));
+}
+
+KHASH_IMPL(kh_ib_ah, struct ibv_ah_attr, struct ibv_ah*, 1,
+           kh_ib_ah_hash_func, kh_ib_ah_hash_equal)
+
+
 
 //============================================================================================
 static struct ibv_context *open_ib_device_by_name(const char *ib_dev_name)
@@ -490,6 +517,9 @@ struct rdma_device *rdma_open_device_target(struct sockaddr *addr) /* client */
         goto clean_qp;
     }
     
+    DEBUG_LOG("init AH cache\n");
+    kh_init_inplace(kh_ib_ah, &rdma_dev->ah_hash);
+
     return rdma_dev;
 
 clean_qp:
@@ -628,7 +658,7 @@ struct rdma_device *rdma_open_device_source(struct sockaddr *addr) /* server */
         fprintf(stderr, "Failed to modify QP to INIT, error %d\n", ret_val);
         goto clean_qp;
     }
-    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
+    DEBUG_LOG("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
     ret_val = rdma_set_lid_gid_from_port_info(rdma_dev);
     if (ret_val) {
@@ -639,6 +669,9 @@ struct rdma_device *rdma_open_device_source(struct sockaddr *addr) /* server */
     if (ret_val) {
         goto clean_qp;
     }
+
+    DEBUG_LOG("init AH cache\n");
+    kh_init_inplace(kh_ib_ah, &rdma_dev->ah_hash);
     
     return rdma_dev;
 
@@ -670,6 +703,7 @@ clean_rdma_dev:
 void rdma_close_device(struct rdma_device *rdma_dev)
 {
     int ret_val;
+    struct ibv_ah *ah;
 
     if (rdma_dev->rdma_buff_cnt > 0) {
         fprintf(stderr, "The number of attached RDMA buffers is not zero (%d). Can't close device.\n",
@@ -699,12 +733,18 @@ void rdma_close_device(struct rdma_device *rdma_dev)
         return;
     }
 
+    DEBUG_LOG("destroy ibv_ah's\n");
+    kh_foreach_value(&rdma_dev->ah_hash, ah, ibv_destroy_ah(ah));
+
     DEBUG_LOG("ibv_dealloc_pd(%p)\n", rdma_dev->pd);
     ret_val = ibv_dealloc_pd(rdma_dev->pd);
     if (ret_val) {
         fprintf(stderr, "Couldn't deallocate PD, error %d\n", ret_val);
         return;
     }
+
+    DEBUG_LOG("destroy AH cache(%p)\n", rdma_dev->ah_hash);
+    kh_destroy_inplace(kh_ib_ah, &rdma_dev->ah_hash);
 
     close_ib_device(rdma_dev);
 
@@ -823,7 +863,48 @@ int rdma_buffer_get_desc_str(struct rdma_buffer *rdma_buff, char *desc_str, size
 }
 
 //============================================================================================
-static struct ibv_ah    *ah = NULL;
+static int rdma_create_ah_cached(struct rdma_device *rdma_dev,
+				 struct ibv_ah_attr *ah_attr,
+				 struct ibv_ah **p_ah)
+{
+    int ret = -1;
+    khiter_t iter;
+
+    /* looking for existing AH with same attributes */
+    iter = kh_get(kh_ib_ah, &rdma_dev->ah_hash, *ah_attr);
+    if (iter == kh_end(&rdma_dev->ah_hash)) {
+        /* new AH */
+        DEBUG_LOG_FAST_PATH("ibv_create_ah(dlid=%d sl=%d port=%d is_g=%d)\n", 
+            ah_attr->dlid, ah_attr->sl, ah_attr->port_num, ah_attr->is_global);
+        *p_ah = ibv_create_ah(rdma_dev->pd, ah_attr);
+        if (*p_ah == NULL) {
+            perror("ibv_create_ah");
+            goto out;
+        }
+
+        /* store AH in hash */
+        iter = kh_put(kh_ib_ah, &rdma_dev->ah_hash, *ah_attr, &ret);
+
+        /* failed to store - rollback */
+        if (iter == kh_end(&rdma_dev->ah_hash)) {
+            perror("rdma_create_ah_cached failed storing");
+            ibv_destroy_ah(*p_ah);
+            goto out;
+        }
+
+        kh_value(&rdma_dev->ah_hash, iter) = *p_ah;
+        ret = 0;
+    } else {
+        /* found existing AH */
+        *p_ah = kh_value(&rdma_dev->ah_hash, iter);
+        ret = 0;
+    }
+
+out:
+    return ret;
+}
+
+//============================================================================================
 int rdma_write_to_peer(struct rdma_write_attr *attr)
 {
     unsigned long long  rem_buf_addr = 0;
@@ -833,7 +914,7 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     uint16_t            rem_dctn = 0; // QP number from DCT (client)
     int                 is_global = 0;
     union ibv_gid       rem_gid;
-    
+    struct ibv_ah      *ah;
     struct rdma_device *rdma_dev = attr->local_buf_rdma->rdma_dev;
 
     /*
@@ -916,12 +997,9 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
         ah_attr.grh.dgid = rem_gid;
         ah_attr.grh.sgid_index = rdma_dev->gidx;
     }
-    if (!ah) {
-        ah = ibv_create_ah(rdma_dev->pd, &ah_attr);
-        if (!ah) {
-            perror("ibv_create_ah");
-            return 1;
-        }
+
+    if (rdma_create_ah_cached(rdma_dev, &ah_attr, &ah)) {
+        return 1;
     }
     
     DEBUG_LOG_FAST_PATH("RDMA Write: mlx5dv_wr_set_dc_addr: mqpex = %p, ah = %p, rem_dctn = 0x%06x\n",
@@ -953,19 +1031,9 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
         ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (uintptr_t)attr->local_buf_rdma->buf_addr, (uint32_t)rem_buf_size);
     }
 
-    //TODO - in the current implementation when we are not using hash, we need to free ah
-    //int ret_val = ibv_destroy_ah(ah);
-    //if (ret_val) {
-    //    perror("ibv_destroy_ah");
-    //    return 1;
-    //}
-
     /* ring DB */
     DEBUG_LOG_FAST_PATH("ibv_wr_complete: qpex = %p\n", rdma_dev->qpex);
     return ibv_wr_complete(rdma_dev->qpex);
-    // TODO: question: where should we use the following fields of struct rdma_write_attr:
-    //    struct iovec       *local_buf_iovec;
-    //    int                 local_buf_iovcnt; ???
 }
 
 //============================================================================================
@@ -982,27 +1050,16 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
     }
 
     /* Polling completion queue */
-//    do {
     //DEBUG_LOG_FAST_PATH("Polling completion queue: ibv_poll_cq\n");
     reported_entries = ibv_poll_cq(rdma_dev->cq, num_entries, wc);
     if (reported_entries < 0) {
         fprintf(stderr, "poll CQ failed %d\n", reported_entries);
         return 0;
     }
-//    } while (reported_entries < 1);
 
     for (i = 0; i < reported_entries; ++i) {
         event[i].wr_id  = wc[i].wr_id;
         event[i].status = wc[i].status; // or (wc[i].status == IBV_WC_SUCCESS)? RDMA_STATUS_SUCCESS: RDMA_STATUS_ERR_LAST
-    }
-    //MB - TODO
-    if (ah){
-        int ret_val = ibv_destroy_ah(ah);
-        if (ret_val) {
-            perror("ibv_destroy_ah");
-            return 1;
-        }
-        ah = NULL;
     }
     return reported_entries;
 }
