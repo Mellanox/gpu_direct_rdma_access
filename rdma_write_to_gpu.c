@@ -1082,6 +1082,13 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
 //        fprintf(stderr, "Couldn't get address handler\n");
 //        return 1;
 //    }
+    struct ibv_ah_attr  ah_attr;
+
+    memset(&ah_attr, 0, sizeof ah_attr);
+    ah_attr.is_global   = is_global;
+    ah_attr.dlid        = rem_lid;
+    ah_attr.port_num    = rdma_dev->ib_port;
+    
     if (ah_attr.is_global) {
         ah_attr.grh.hop_limit = 1;
         ah_attr.grh.dgid = rem_gid;
