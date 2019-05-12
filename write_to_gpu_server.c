@@ -186,6 +186,10 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             }
             break;
 
+        case 's':
+            usr_par->size = strtol(optarg, NULL, 0);
+            break;
+
         case 'n':
             usr_par->iters = strtol(optarg, NULL, 0);
             break;

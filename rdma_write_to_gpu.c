@@ -271,7 +271,7 @@ static struct ibv_context *open_ib_device_by_addr(struct rdma_device *rdma_dev, 
 
 	rdma_dev->ib_port = rdma_dev->cm_id->port_num;
 
-	DEBUG_LOG("Bound to RDMA device, at <%s, %d>, name:%s, port\n",
+	DEBUG_LOG("Bound to RDMA device, at <%s, %d>, name:%s, port %u\n",
 		str, ntohs(sin_port), rdma_dev->cm_id->verbs->device->name, rdma_dev->cm_id->port_num);
 
 	return rdma_dev->cm_id->verbs;
