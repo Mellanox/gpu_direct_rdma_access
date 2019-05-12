@@ -249,7 +249,7 @@ int main(int argc, char *argv[])
         goto clean_usr_par;
     }
 
-    printf("Connecting to remote server \"%s\"\n", usr_par.servername);
+    printf("Connecting to remote server \"%s:%d\"\n", usr_par.servername, usr_par.port);
     sockfd = open_client_socket(usr_par.servername, usr_par.port);
     free(usr_par.servername);
 
@@ -257,6 +257,8 @@ int main(int argc, char *argv[])
         ret_val = 1;
         goto clean_usr_par;
     }
+
+    printf("Opening rdma device\n");
     rdma_dev = rdma_open_device_target(&usr_par.hostaddr); /* client */
     if (!rdma_dev) {
         ret_val = 1;
@@ -293,6 +295,7 @@ int main(int argc, char *argv[])
         goto clean_rdma_buff;
     }
     
+    printf("Starting data requests (%d iters)\n", usr_par.iters);
     if (gettimeofday(&start, NULL)) {
         perror("gettimeofday");
         ret_val = 1;
