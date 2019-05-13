@@ -128,7 +128,7 @@ static void usage(const char *argv0)
     printf("  -s, --size=<size>         size of message to exchange (default 4096)\n");
     printf("  -n, --iters=<iters>       number of exchanges (default 1000)\n");
     printf("  -u, --use-cuda=<BDF>      use CUDA pacage (work with GPU memoty),\n"
-           "                            BDF corresponding to CUDA device, for example, \"0000:3e:02.0\"\n");
+           "                            BDF corresponding to CUDA device, for example, \"3e:02.0\"\n");
     printf("  -D, --debug-mask=<mask>   debug bitmask: bit 0 - debug print enable,\n"
            "                                           bit 1 - fast path debug print enable\n");
 }

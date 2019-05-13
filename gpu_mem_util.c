@@ -97,23 +97,20 @@ static void print_gpu_devices_info(void)
         char        name[128];
         int         pci_bus_id    = 0;
         int         pci_device_id = 0;
-        int         pci_domain_id = 0;
         int         pci_func = 0; /*always 0 for CUDA device*/
 
         CUCHECK(cuDeviceGet(&cu_dev, i));
         CUCHECK(cuDeviceGetName(name, sizeof(name), cu_dev));
         CUCHECK(cuDeviceGetAttribute (&pci_bus_id   , CU_DEVICE_ATTRIBUTE_PCI_BUS_ID   , cu_dev)); /*PCI bus identifier of the device*/
         CUCHECK(cuDeviceGetAttribute (&pci_device_id, CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID, cu_dev)); /*PCI device (also known as slot) identifier of the device*/
-        CUCHECK(cuDeviceGetAttribute (&pci_domain_id, CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID, cu_dev)); /*PCI domain identifier of the device*/
 
-        DEBUG_LOG("device %d, handle %d, name \"%s\", BDF %04x:%02x:%02x.%d\n",
-                  i, cu_dev, name, pci_domain_id, pci_bus_id, pci_device_id, pci_func);
+        DEBUG_LOG("device %d, handle %d, name \"%s\", BDF %02x:%02x.%d\n",
+                  i, cu_dev, name, pci_bus_id, pci_device_id, pci_func);
     }
 }
 
 static int get_gpu_device_id_from_bdf(const char *bdf)
 {
-    int     given_domain_id = 0;
     int     given_bus_id = 0;
     int     given_device_id = 0;
     int     given_func = 0;
@@ -121,11 +118,11 @@ static int get_gpu_device_id_from_bdf(const char *bdf)
     int     i;
     int     ret_val;
     
-                    /*    "0000:3e:02.0"*/
-    ret_val = sscanf(bdf, "%x:%x:%x.%x", &given_domain_id, &given_bus_id, &given_device_id, &given_func);
+                    /*    "3e:02.0"*/
+    ret_val = sscanf(bdf, "%x:%x.%x", &given_bus_id, &given_device_id, &given_func);
     if (ret_val != 4){
-        fprintf(stderr, "Wrong BDF format \"%s\". Expected format example: \"0000:3e:02.0\", "
-                        "where 0000 - domain id, 3e - bus id, 02 - device id, 0 - function\n", bdf);
+        fprintf(stderr, "Wrong BDF format \"%s\". Expected format example: \"3e:02.0\", "
+                        "where 3e - bus id, 02 - device id, 0 - function\n", bdf);
         return -1;
     }
     if (given_func != 0) {
@@ -143,13 +140,11 @@ static int get_gpu_device_id_from_bdf(const char *bdf)
         CUdevice    cu_dev;
         int         pci_bus_id    = 0;
         int         pci_device_id = 0;
-        int         pci_domain_id = 0;
 
         CUCHECK(cuDeviceGet(&cu_dev, i));
         CUCHECK(cuDeviceGetAttribute (&pci_bus_id   , CU_DEVICE_ATTRIBUTE_PCI_BUS_ID   , cu_dev)); /*PCI bus identifier of the device*/
         CUCHECK(cuDeviceGetAttribute (&pci_device_id, CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID, cu_dev)); /*PCI device (also known as slot) identifier of the device*/
-        CUCHECK(cuDeviceGetAttribute (&pci_domain_id, CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID, cu_dev)); /*PCI domain identifier of the device*/
-        if ((pci_domain_id == given_domain_id) && (pci_bus_id == given_bus_id) && (pci_device_id == given_device_id)){
+        if ((pci_bus_id == given_bus_id) && (pci_device_id == given_device_id)){
             return i;
         }
     }
