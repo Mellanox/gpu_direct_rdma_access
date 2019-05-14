@@ -14,10 +14,10 @@ OEXE_CLT = write_to_gpu_client
 OEXE_SRV = write_to_gpu_server
 
 DEPS = rdma_write_to_gpu.h
+DEPS += ibv_helper.h
+DEPS += khash.h
 DEPS += gpu_mem_util.h
 DEPS += utils.h
-
-DEPS = $(patsubst %,$(IDIR)/%,$(_DEPS))
 
 OBJS = rdma_write_to_gpu.o
 OBJS += gpu_mem_util.o

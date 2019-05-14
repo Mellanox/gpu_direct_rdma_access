@@ -33,10 +33,10 @@
 #ifndef _RDMA_WRITE_TO_GPU_H_
 #define _RDMA_WRITE_TO_GPU_H_
 
+#include <sys/uio.h> /* This file defines `struct iovec'  */
+
 #include <infiniband/verbs.h>
 #include <infiniband/mlx5dv.h>
-/* This file defines `struct iovec'  */
-#include <bits/uio.h>
 
 #ifdef __cplusplus
 extern "C" {
