@@ -120,13 +120,13 @@ static int get_gpu_device_id_from_bdf(const char *bdf)
     
                     /*    "3e:02.0"*/
     ret_val = sscanf(bdf, "%x:%x.%x", &given_bus_id, &given_device_id, &given_func);
-    if (ret_val != 4){
+    if (ret_val != 3){
         fprintf(stderr, "Wrong BDF format \"%s\". Expected format example: \"3e:02.0\", "
                         "where 3e - bus id, 02 - device id, 0 - function\n", bdf);
         return -1;
     }
     if (given_func != 0) {
-        fprintf(stderr, "Wrong pci function %d, 0 is expected\n", given_func)
+        fprintf(stderr, "Wrong pci function %d, 0 is expected\n", given_func);
         return -1;
     }
     CUCHECK(cuDeviceGetCount(&device_count));
@@ -148,7 +148,7 @@ static int get_gpu_device_id_from_bdf(const char *bdf)
             return i;
         }
     }
-    fprintf(stderr, "Given BDF \"%s\" doesn't match one of GPU devices\n", bdf)
+    fprintf(stderr, "Given BDF \"%s\" doesn't match one of GPU devices\n", bdf);
     return -1;
 }
 
@@ -156,22 +156,20 @@ static void *init_gpu(size_t gpu_buf_size, const char *bdf)
 {
     const size_t    gpu_page_size = 64*1024;
     size_t          aligned_size;
-    CUresult        error;
-    int             dev_id;
+    CUresult        cu_result;
 
     aligned_size = (gpu_buf_size + gpu_page_size - 1) & ~(gpu_page_size - 1);
     printf("initializing CUDA\n");
-    error = cuInit(0);
-    if (error != CUDA_SUCCESS) {
-        fprintf(stderr, "cuInit(0) returned %d\n", error);
+    cu_result = cuInit(0);
+    if (cu_result != CUDA_SUCCESS) {
+        fprintf(stderr, "cuInit(0) returned %d\n", cu_result);
         return NULL;
     }
 
-    if (error != CUDA_SUCCESS) {
-        fprintf(stderr, "cuDeviceGetCount() returned %d\n", error);
-        return NULL;
+    if (debug) {
+        print_gpu_devices_info();
     }
-
+    
     int dev_id = get_gpu_device_id_from_bdf(bdf);
     if (dev_id < 0) {
         fprintf(stderr, "Wrong device index (%d) obtained from bdf \"%s\"\n",
@@ -186,24 +184,24 @@ static void *init_gpu(size_t gpu_buf_size, const char *bdf)
 
     DEBUG_LOG("creating CUDA Contnext\n");
     /* Create context */
-    error = cuCtxCreate(&cuContext, CU_CTX_MAP_HOST, cu_dev);
-    if (error != CUDA_SUCCESS) {
-        fprintf(stderr, "cuCtxCreate() error=%d\n", error);
+    cu_result = cuCtxCreate(&cuContext, CU_CTX_MAP_HOST, cu_dev);
+    if (cu_result != CUDA_SUCCESS) {
+        fprintf(stderr, "cuCtxCreate() error=%d\n", cu_result);
         return NULL;
     }
 
     DEBUG_LOG("making it the current CUDA Context\n");
-    error = cuCtxSetCurrent(cuContext);
-    if (error != CUDA_SUCCESS) {
-        fprintf(stderr, "cuCtxSetCurrent() error=%d\n", error);
+    cu_result = cuCtxSetCurrent(cuContext);
+    if (cu_result != CUDA_SUCCESS) {
+        fprintf(stderr, "cuCtxSetCurrent() error=%d\n", cu_result);
         return NULL;
     }
 
     DEBUG_LOG("cuMemAlloc() of a %zd bytes GPU buffer\n", aligned_size);
     CUdeviceptr d_A;
-    error = cuMemAlloc(&d_A, aligned_size);
-    if (error != CUDA_SUCCESS) {
-        fprintf(stderr, "cuMemAlloc error=%d\n", error);
+    cu_result = cuMemAlloc(&d_A, aligned_size);
+    if (cu_result != CUDA_SUCCESS) {
+        fprintf(stderr, "cuMemAlloc error=%d\n", cu_result);
         return NULL;
     }
     DEBUG_LOG("allocated GPU buffer address at %016llx pointer=%p\n", d_A, (void*)d_A);
@@ -237,9 +235,6 @@ void *work_buffer_alloc(size_t length, int use_cuda, const char *bdf)
     if (use_cuda) {
         /* Mem allocation on GPU */
 #ifdef HAVE_CUDA
-        if (debug) {
-            print_gpu_devices_info();
-        }
         buff = init_gpu(length, bdf);
 #else
         fprintf(stderr, "Can't init GPU, HAVE_CUDA mode isn't set");
