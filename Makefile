@@ -2,14 +2,12 @@ IDIR = .
 CC = gcc
 ODIR = obj
 
-USE_CUDA = 0
-
-ifeq ($(USE_CUDA),0)
-  CFLAGS = -I$(IDIR) -g
-  LIBS = -Wall -lrdmacm -libverbs -lmlx5
-else
+ifeq ($(USE_CUDA),1)
   CFLAGS = -I$(IDIR) -g -DHAVE_CUDA
   LIBS = -Wall -lrdmacm -libverbs -lmlx5 -lcuda
+else
+  CFLAGS = -I$(IDIR) -g
+  LIBS = -Wall -lrdmacm -libverbs -lmlx5
 endif
 
 OEXE_CLT = write_to_gpu_client
