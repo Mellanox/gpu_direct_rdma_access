@@ -49,7 +49,8 @@
 #include <time.h>
 
 #ifdef HAVE_CUDA
-#include "/usr/local/cuda/include/cuda.h"
+/* "/usr/local/cuda/include/" is added to build include path in the Makefile */
+#include "cuda.h"
 #endif //HAVE_CUDA
 
 #include "gpu_mem_util.h"
