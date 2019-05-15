@@ -283,7 +283,7 @@ int main(int argc, char *argv[])
         int     expected_comp_events = usr_par.num_sges? (usr_par.num_sges+MAX_SEND_SGE-1)/MAX_SEND_SGE: 1;
 
         /* Receiving RDMA data (address, size, rkey etc.) from socket as a triger to start RDMA write operation */
-        DEBUG_LOG_FAST_PATH("Iteration %d: Waiting to Receive message of size %d\n", cnt, sizeof desc_str);
+        DEBUG_LOG_FAST_PATH("Iteration %d: Waiting to Receive message of size %lu\n", cnt, sizeof desc_str);
         r_size = recv(sockfd, desc_str, sizeof desc_str, MSG_WAITALL);
         if (r_size != sizeof desc_str) {
             fprintf(stderr, "Couldn't receive RDMA data for iteration %d\n", cnt);
