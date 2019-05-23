@@ -766,6 +766,8 @@ struct rdma_buffer *rdma_buffer_reg(struct rdma_device *rdma_dev, void *addr, si
     enum ibv_access_flags   access_flags =  IBV_ACCESS_LOCAL_WRITE |
                                             IBV_ACCESS_REMOTE_WRITE;
     /*In the case of local buffer we can use IBV_ACCESS_LOCAL_WRITE only flag*/
+    DEBUG_LOG("ibv_reg_mr(pd %p, buf %p, size = %lu, access_flags = 0x%08x\n",
+               rdma_dev->pd, addr, length, access_flags);
     rdma_buff->mr = ibv_reg_mr(rdma_dev->pd, addr, length, access_flags);
     if (!rdma_buff->mr) {
         fprintf(stderr, "Couldn't register GPU MR\n");

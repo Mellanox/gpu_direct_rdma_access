@@ -2,14 +2,13 @@ IDIR = .
 CC = gcc
 ODIR = obj
 
-ICFLAGS = -I/usr/local/cuda-10.1/targets/x86_64-linux/include
-ICFLAGS += -I/usr/local/cuda/include
-
 ifeq ($(USE_CUDA),1)
-  CFLAGS = -I$(IDIR) $(ICFLAGS) -g -DHAVE_CUDA
+  CUDAFLAGS = -I/usr/local/cuda-10.1/targets/x86_64-linux/include
+  CUDAFLAGS += -I/usr/local/cuda/include
+  CFLAGS = -I$(IDIR) $(CUDAFLAGS) -g -DHAVE_CUDA
   LIBS = -Wall -lrdmacm -libverbs -lmlx5 -lcuda
 else
-  CFLAGS = -I$(IDIR) $(ICFLAGS) -g
+  CFLAGS = -I$(IDIR) -g
   LIBS = -Wall -lrdmacm -libverbs -lmlx5
 endif
 
