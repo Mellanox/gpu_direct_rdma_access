@@ -280,7 +280,7 @@ int main(int argc, char *argv[])
         char    ackmsg[sizeof "rdma_write completed"];
         struct rdma_write_attr  write_attr;
         int     i;
-        int     expected_comp_events = usr_par.num_sges? (usr_par.num_sges+MAX_SEND_SGE-1)/MAX_SEND_SGE: 1;
+        //int     expected_comp_events = usr_par.num_sges? (usr_par.num_sges+MAX_SEND_SGE-1)/MAX_SEND_SGE: 1;
 
         /* Receiving RDMA data (address, size, rkey etc.) from socket as a triger to start RDMA write operation */
         DEBUG_LOG_FAST_PATH("Iteration %d: Waiting to Receive message of size %lu\n", cnt, sizeof desc_str);
@@ -295,18 +295,18 @@ int main(int argc, char *argv[])
         write_attr.remote_buf_desc_str      = desc_str;
         write_attr.remote_buf_desc_length   = sizeof desc_str;
         write_attr.local_buf_rdma           = rdma_buff;
-        write_attr.wr_id                    = cnt * expected_comp_events;
+        write_attr.wr_id                    = cnt;// * expected_comp_events;
 
         /* Executing RDMA write */
         SDEBUG_LOG_FAST_PATH ((char*)buff, "Write iteration N %d", cnt);
         /* Prepare send sg_list */
         if (usr_par.num_sges) {
-            if (usr_par.num_sges > 100) {
+            if (usr_par.num_sges > 200) {
                 fprintf(stderr, "num_sges %d is too big\n", usr_par.num_sges);
                 ret_val = 1;
                 goto clean_rdma_buff;
             }
-            struct iovec buf_iovec[100];
+            struct iovec buf_iovec[200];
             memset(buf_iovec, 0, sizeof buf_iovec);
             write_attr.local_buf_iovcnt = usr_par.num_sges;
             write_attr.local_buf_iovec  = buf_iovec;
@@ -328,9 +328,9 @@ int main(int argc, char *argv[])
         struct rdma_completion_event rdma_comp_ev[10];
         int    reported_ev  = 0;
         do {
-            reported_ev += rdma_poll_completions(rdma_dev, &rdma_comp_ev[reported_ev], 10-reported_ev);
+            reported_ev += rdma_poll_completions(rdma_dev, &rdma_comp_ev[reported_ev], 10/*expected_comp_events-reported_ev*/);
             //TODO - we can put sleep here
-        } while (reported_ev < expected_comp_events);
+        } while (reported_ev < 1/*expected_comp_events*/);
         DEBUG_LOG_FAST_PATH("Finished polling\n");
 
         for (i = 0; i < reported_ev; ++i) {
