@@ -918,6 +918,42 @@ out:
 }
 
 //============================================================================================
+static int buff_size_validation(struct rdma_write_attr *attr, unsigned long rem_buf_size)
+{
+    size_t  total_len = 0;
+    int     i;
+
+    for (i = 0; i < attr->local_buf_iovcnt; i++) {
+        if ((attr->local_buf_iovec[i].iov_base < attr->local_buf_rdma->buf_addr) ||
+            (attr->local_buf_iovec[i].iov_base + attr->local_buf_iovec[i].iov_len >
+             attr->local_buf_rdma->buf_addr + attr->local_buf_rdma->buf_size)) {
+
+            fprintf(stderr, "sge buffer %d (%p, %p) exceeds the local buffer bounary (%p, %p)\n", i,
+                    attr->local_buf_iovec[i].iov_base, attr->local_buf_iovec[i].iov_base + attr->local_buf_iovec[i].iov_len,
+                    attr->local_buf_rdma->buf_addr, attr->local_buf_rdma->buf_addr + attr->local_buf_rdma->buf_size);
+            return 1;
+        }
+        total_len += attr->local_buf_iovec[i].iov_len;
+        if (total_len > rem_buf_size) {
+            fprintf(stderr, "The sum of sge buffers lengths (%lu) exceeded the remote buffer size %lu on iteration %d\n",
+                    total_len, rem_buf_size, i);
+            return 1;
+        }
+    }
+    if ((attr->local_buf_iovcnt) && (total_len != rem_buf_size)) {
+        fprintf(stderr, "The sum of sge buffers lengths (%lu) differs from the remote buffer size %lu\n",
+                total_len, rem_buf_size);
+        return 1;
+    }
+    if ((!attr->local_buf_iovcnt) && (rem_buf_size > attr->local_buf_rdma->buf_size)) {
+        fprintf(stderr, "When not using sge list, the requested buffer size %lu is greater than allocated local size %lu\n",
+                rem_buf_size, attr->local_buf_rdma->buf_size);
+        return 1;
+    }
+    return 0;
+}
+
+//============================================================================================
 int rdma_write_to_peer(struct rdma_write_attr *attr)
 {
     unsigned long long  rem_buf_addr = 0;
@@ -929,6 +965,7 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     union ibv_gid       rem_gid;
     struct ibv_ah      *ah;
     struct rdma_device *rdma_dev = attr->local_buf_rdma->rdma_dev;
+    int                 ret_val;
 
     /*
      * Parse desc string, extracting remote buffer address, size, rkey, lid, dctn, and if global is true, also gid
@@ -954,37 +991,12 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
      * Pass attr->local_buf_iovec - local_buf_iovcnt elements and check that
      * the sum of local_buf_iovec[i].iov_len doesn't exceed rem_buf_size
      */
-    size_t  total_len = 0;
-    /* We do these validation code in debug mode only, because if something
-       is wrong in the fast path, the HW will give completion error */
     if (debug_fast_path) {
-        int     i;
-        for (i = 0; i < attr->local_buf_iovcnt; i++) {
-            if ((attr->local_buf_iovec[i].iov_base < attr->local_buf_rdma->buf_addr) ||
-                (attr->local_buf_iovec[i].iov_base + attr->local_buf_iovec[i].iov_len >
-                 attr->local_buf_rdma->buf_addr + attr->local_buf_rdma->buf_size)) {
-    
-                fprintf(stderr, "sge buffer %d (%p, %p) exceeds the local buffer bounary (%p, %p)\n", i,
-                        attr->local_buf_iovec[i].iov_base, attr->local_buf_iovec[i].iov_base + attr->local_buf_iovec[i].iov_len,
-                        attr->local_buf_rdma->buf_addr, attr->local_buf_rdma->buf_addr + attr->local_buf_rdma->buf_size);
-                return 1;
-            }
-            total_len += attr->local_buf_iovec[i].iov_len;
-            if (total_len > rem_buf_size) {
-                fprintf(stderr, "The sum of sge buffers lengths (%lu) exceeded the remote buffer size %lu on iteration %d\n",
-                        total_len, rem_buf_size, i);
-                return 1;
-            }
-        }
-        if ((attr->local_buf_iovcnt) && (total_len != rem_buf_size)) {
-            fprintf(stderr, "The sum of sge buffers lengths (%lu) differs from the remote buffer size %lu\n",
-                    total_len, rem_buf_size);
-            return 1;
-        }
-        if ((!attr->local_buf_iovcnt) && (rem_buf_size > attr->local_buf_rdma->buf_size)) {
-            fprintf(stderr, "When not using sge list, the requested buffer size %lu is greater than allocated local size %lu\n",
-                    rem_buf_size, attr->local_buf_rdma->buf_size);
-            return 1;
+        /* We do these validation code in debug mode only, because if something
+           is wrong in the fast path, the HW will give completion error */
+        ret_val = buff_size_validation(attr, rem_buf_size);
+        if (ret_val) {
+            return ret_val;
         }
     }
     
@@ -1019,8 +1031,7 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_start: qpex = %p\n", rdma_dev->qpex);
     ibv_wr_start(rdma_dev->qpex);
 
-    int ret_val,
-        wr_id_idx;
+    int     wr_id_idx;
     
     if (attr->local_buf_iovcnt) {
         uint64_t curr_rem_addr = (uint64_t)rem_buf_addr;
@@ -1037,7 +1048,8 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
             // end of atomic operation
             rdma_dev->app_wr_id[wr_id_idx].wr_id = attr->wr_id;
             rdma_dev->qpex->wr_id = (uint64_t)wr_id_idx;
-            DEBUG_LOG_FAST_PATH("RDMA Write: wr_id_idx %d: wr_id 0x%llx\n", wr_id_idx, attr->wr_id);
+            DEBUG_LOG_FAST_PATH("RDMA Write: wr_id_idx %d: wr_id 0x%llx\n",
+                                wr_id_idx, (long long unsigned int)attr->wr_id);
             DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%lx, remote buf 0x%llx\n",
                                 rdma_dev->qpex, rem_buf_rkey, (long long unsigned int)curr_rem_addr);
             ibv_wr_rdma_write(rdma_dev->qpex, rem_buf_rkey, curr_rem_addr);
@@ -1103,7 +1115,8 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
                           uint32_t                      num_entries)
 {
     struct ibv_wc wc[COMP_ARRAY_SIZE];
-    int    reported_entries, i, wcn;
+    int    reported_entries = 0,
+           i, wcn;
 
     if (num_entries > COMP_ARRAY_SIZE){
         num_entries = COMP_ARRAY_SIZE; /* We don't returne more than 16 entries,
@@ -1121,7 +1134,9 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
     rdma_dev->qp_available_wr += wcn;
     for (i = 0; i < wcn; ++i) {
         DEBUG_LOG_FAST_PATH("cqe idx %d: virtual wr_id %llu, original wr_id 0x%llx, report %d\n",
-                            i, wc[i].wr_id, rdma_dev->app_wr_id[wc[i].wr_id].wr_id, rdma_dev->app_wr_id[wc[i].wr_id].report);
+                            i, (long long unsigned int)wc[i].wr_id,
+                            (long long unsigned int)rdma_dev->app_wr_id[wc[i].wr_id].wr_id,
+                            rdma_dev->app_wr_id[wc[i].wr_id].report);
         if (rdma_dev->app_wr_id[wc[i].wr_id].report == 1) {
             rdma_dev->app_wr_id[wc[i].wr_id].report = 0;
             event[reported_entries].wr_id  = rdma_dev->app_wr_id[wc[i].wr_id].wr_id;
