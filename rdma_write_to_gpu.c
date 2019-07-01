@@ -74,7 +74,7 @@ KHASH_TYPE(kh_ib_ah, struct ibv_ah_attr, struct ibv_ah*);
 
 struct wr_id_reported {
     uint64_t    wr_id;
-    int         report; /*1-true/0-false*/
+    uint32_t    num_wrs;
 };
 
 struct rdma_device {
@@ -98,7 +98,6 @@ struct rdma_device {
     uint16_t            lid;
     enum ibv_mtu        mtu;
 
-    enum rdma_completion_status cqe_status;
     struct wr_id_reported       app_wr_id[SEND_Q_DEPTH];
     int                 app_wr_id_idx;
     int                 qp_available_wr;
@@ -941,14 +940,12 @@ static int buff_size_validation(struct rdma_write_attr *attr, unsigned long rem_
         }
     }
     if ((attr->local_buf_iovcnt) && (total_len != rem_buf_size)) {
-        fprintf(stderr, "The sum of sge buffers lengths (%lu) differs from the remote buffer size %lu\n",
+        fprintf(stderr, "WARN: The sum of sge buffers lengths (%lu) differs from the remote buffer size %lu\n",
                 total_len, rem_buf_size);
-        return 1;
     }
     if ((!attr->local_buf_iovcnt) && (rem_buf_size > attr->local_buf_rdma->buf_size)) {
-        fprintf(stderr, "When not using sge list, the requested buffer size %lu is greater than allocated local size %lu\n",
+        fprintf(stderr, "WARN: When not using sge list, the requested buffer size %lu is greater than allocated local size %lu\n",
                 rem_buf_size, attr->local_buf_rdma->buf_size);
-        return 1;
     }
     return 0;
 }
@@ -1000,7 +997,7 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
         }
     }
     
-    int     required_wr = (attr->local_buf_iovcnt)? (attr->local_buf_iovcnt + MAX_SEND_SGE - 1) / MAX_SEND_SGE: 1;
+    int required_wr = (attr->local_buf_iovcnt)? (attr->local_buf_iovcnt + MAX_SEND_SGE - 1) / MAX_SEND_SGE: 1;
 
     if (required_wr > rdma_dev->qp_available_wr) {
         fprintf(stderr, "Required WR number %d is greater than available in QP WRs %d\n",
@@ -1031,78 +1028,74 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_start: qpex = %p\n", rdma_dev->qpex);
     ibv_wr_start(rdma_dev->qpex);
 
-    int     wr_id_idx;
-    
+    // The following code should be atomic operation
+    int wr_id_idx = rdma_dev->app_wr_id_idx++;
+    if (rdma_dev->app_wr_id_idx >= SEND_Q_DEPTH) {
+        rdma_dev->app_wr_id_idx = 0;
+    }
+    // end of atomic operation
+
+    // update internal wr_id DB
+    rdma_dev->qp_available_wr -= required_wr;
+    rdma_dev->app_wr_id[wr_id_idx].num_wrs = required_wr;
+
     if (attr->local_buf_iovcnt) {
-        uint64_t curr_rem_addr = (uint64_t)rem_buf_addr;
-        int      num_sges_to_send = attr->local_buf_iovcnt,
-                 start_i = 0;
-        struct ibv_sge sg_list[MAX_SEND_SGE];
+        int i, start_i = 0;
+	struct ibv_sge sg_list[MAX_SEND_SGE];
+	uint64_t curr_rem_addr = (uint64_t)rem_buf_addr;
+	int num_sges_to_send = attr->local_buf_iovcnt;
+	int curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
 
         while (num_sges_to_send > 0) {
-            // The following code should be atomic operation
-            wr_id_idx = rdma_dev->app_wr_id_idx++;
-            if (rdma_dev->app_wr_id_idx >= SEND_Q_DEPTH) {
-                rdma_dev->app_wr_id_idx = 0;
-            }
-            // end of atomic operation
             rdma_dev->app_wr_id[wr_id_idx].wr_id = attr->wr_id;
             rdma_dev->qpex->wr_id = (uint64_t)wr_id_idx;
-            DEBUG_LOG_FAST_PATH("RDMA Write: wr_id_idx %d: wr_id 0x%llx\n",
-                                wr_id_idx, (long long unsigned int)attr->wr_id);
-            DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%lx, remote buf 0x%llx\n",
-                                rdma_dev->qpex, rem_buf_rkey, (long long unsigned int)curr_rem_addr);
+            rdma_dev->qpex->wr_flags = num_sges_to_send > MAX_SEND_SGE ? 0 : IBV_SEND_SIGNALED;
+
+            DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_rdma_write: wr_id=0x%llx, qpex=%p, rkey=0x%lx, remote_buf=0x%llx\n",
+                                (long long unsigned int)attr->wr_id, rdma_dev->qpex, rem_buf_rkey, (long long unsigned int)curr_rem_addr);
             ibv_wr_rdma_write(rdma_dev->qpex, rem_buf_rkey, curr_rem_addr);
 
-            DEBUG_LOG_FAST_PATH("RDMA Write: mlx5dv_wr_set_dc_addr: mqpex = %p, ah = %p, rem_dctn = 0x%06lx\n",
+            DEBUG_LOG_FAST_PATH("RDMA Write: mlx5dv_wr_set_dc_addr: mqpex=%p, ah=%p, rem_dctn=0x%06lx\n",
                                 rdma_dev->mqpex, ah, rem_dctn);
             mlx5dv_wr_set_dc_addr(rdma_dev->mqpex, ah, rem_dctn, DC_KEY);
             
-            int     curr_iovcnt,
-                    i;
-            curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
             for (i = 0; i < curr_iovcnt; i++) {
                 sg_list[i].addr   = (uint64_t)attr->local_buf_iovec[start_i + i].iov_base;
                 sg_list[i].length = (uint32_t)attr->local_buf_iovec[start_i + i].iov_len;
                 sg_list[i].lkey   = (uint32_t)attr->local_buf_rdma->mr->lkey;
                 curr_rem_addr += sg_list[i].length;
             }
-            DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge_list(qpex = %p, num_sge %lu, sg_list %p), start_i %d, num_sges_to_send %d\n",
-                                rdma_dev->qpex, (size_t)curr_iovcnt, (void*)sg_list, start_i, num_sges_to_send);
+            DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge_list(qpex=%p, num_sge=%lu, sg_list=%p), start_i=%d, num_sges_to_send=%d, sg[0].length=%d\n",
+                                rdma_dev->qpex, (size_t)curr_iovcnt, (void*)sg_list, start_i, num_sges_to_send, sg_list[0].length);
             ibv_wr_set_sge_list(rdma_dev->qpex, (size_t)curr_iovcnt, sg_list);
             num_sges_to_send -= curr_iovcnt;
             start_i += curr_iovcnt;
         }
     
     } else {
-        // The following code should be atomic operation
-        wr_id_idx = rdma_dev->app_wr_id_idx++;
-        if (rdma_dev->app_wr_id_idx >= SEND_Q_DEPTH) {
-            rdma_dev->app_wr_id_idx = 0;
-        }
-        // end of atomic operation
         rdma_dev->app_wr_id[wr_id_idx].wr_id = attr->wr_id;
         rdma_dev->qpex->wr_id = (uint64_t)wr_id_idx;
+        rdma_dev->qpex->wr_flags = IBV_SEND_SIGNALED;
         
-        DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_rdma_write: qpex = %p, rkey = 0x%lx, remote buf 0x%llx\n",
-                            rdma_dev->qpex, rem_buf_rkey, (unsigned long long)rem_buf_addr);
+        DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_rdma_write: wr_id=0x%llx, qpex=%p, rkey=0x%lx, remote_buf=0x%llx\n",
+                            (long long unsigned int)attr->wr_id, rdma_dev->qpex, rem_buf_rkey, (unsigned long long)rem_buf_addr);
         ibv_wr_rdma_write(rdma_dev->qpex, rem_buf_rkey, rem_buf_addr);
 
-        DEBUG_LOG_FAST_PATH("RDMA Write: mlx5dv_wr_set_dc_addr: mqpex = %p, ah = %p, rem_dctn = 0x%06lx\n",
+        DEBUG_LOG_FAST_PATH("RDMA Write: mlx5dv_wr_set_dc_addr: mqpex=%p, ah=%p, rem_dctn=0x%06lx\n",
                             rdma_dev->mqpex, ah, rem_dctn);
         mlx5dv_wr_set_dc_addr(rdma_dev->mqpex, ah, rem_dctn, DC_KEY);
         
-        DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge: qpex = %p, lkey 0x%x, local buf 0x%llx, size = %u\n",
+        DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge: qpex=%p, lkey=0x%x, local_buf=0x%llx, size=%u\n",
                             rdma_dev->qpex, attr->local_buf_rdma->mr->lkey,
                             (unsigned long long)attr->local_buf_rdma->buf_addr, (uint32_t)rem_buf_size);
         ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (uintptr_t)attr->local_buf_rdma->buf_addr, (uint32_t)rem_buf_size);
     }
+
     /* ring DB */
-    rdma_dev->qp_available_wr -= required_wr;
-    rdma_dev->app_wr_id[wr_id_idx].report = 1;
-    DEBUG_LOG_FAST_PATH("ibv_wr_complete: qpex = %p\n", rdma_dev->qpex);
+    DEBUG_LOG_FAST_PATH("ibv_wr_complete: qpex=%p, required_wr=%d\n", rdma_dev->qpex, required_wr);
     ret_val = ibv_wr_complete(rdma_dev->qpex);
     if (ret_val) {
+        DEBUG_LOG_FAST_PATH("FAILURE: ibv_wr_complete (error=%d\n", ret_val);
         return ret_val;
     }
     
@@ -1131,23 +1124,15 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
         return 0;
     }
 
-    rdma_dev->qp_available_wr += wcn;
     for (i = 0; i < wcn; ++i) {
-        DEBUG_LOG_FAST_PATH("cqe idx %d: virtual wr_id %llu, original wr_id 0x%llx, report %d\n",
+        DEBUG_LOG_FAST_PATH("cqe idx %d: virtual wr_id %llu, original wr_id 0x%llx, num_wrs=%d\n",
                             i, (long long unsigned int)wc[i].wr_id,
                             (long long unsigned int)rdma_dev->app_wr_id[wc[i].wr_id].wr_id,
-                            rdma_dev->app_wr_id[wc[i].wr_id].report);
-        if (rdma_dev->app_wr_id[wc[i].wr_id].report == 1) {
-            rdma_dev->app_wr_id[wc[i].wr_id].report = 0;
+				rdma_dev->app_wr_id[wc[i].wr_id].num_wrs);
+            rdma_dev->qp_available_wr += rdma_dev->app_wr_id[wc[i].wr_id].num_wrs;
             event[reported_entries].wr_id  = rdma_dev->app_wr_id[wc[i].wr_id].wr_id;
-            event[reported_entries].status = (rdma_dev->cqe_status != 0)? rdma_dev->cqe_status: wc[i].status;
-            rdma_dev->cqe_status = 0;
+            event[reported_entries].status = wc[i].status;
             reported_entries++;
-        } else {
-            if ((rdma_dev->cqe_status == 0) && (wc[i].status != 0)) {
-                rdma_dev->cqe_status = wc[i].status;
-            }
-        }
     }
     return reported_entries;
 }
