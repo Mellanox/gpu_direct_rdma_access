@@ -48,6 +48,8 @@
 #include "gpu_mem_util.h"
 #include "rdma_write_to_gpu.h"
 
+#define MAX_SGES 512
+
 extern int debug;
 extern int debug_fast_path;
 
@@ -225,6 +227,7 @@ int main(int argc, char *argv[])
     struct user_params      usr_par;
     int                     ret_val = 0;
     int                     sockfd;
+    struct iovec            buf_iovec[MAX_SGES];
 
     srand48(getpid() * time(NULL));
 
@@ -301,18 +304,17 @@ int main(int argc, char *argv[])
         SDEBUG_LOG_FAST_PATH ((char*)buff, "Write iteration N %d", cnt);
         /* Prepare send sg_list */
         if (usr_par.num_sges) {
-            if (usr_par.num_sges > 200) {
-                fprintf(stderr, "num_sges %d is too big\n", usr_par.num_sges);
+            if (usr_par.num_sges > MAX_SGES) {
+                fprintf(stderr, "WARN: num_sges %d is too big (max=%d)\n", usr_par.num_sges, MAX_SGES);
                 ret_val = 1;
                 goto clean_rdma_buff;
             }
-            struct iovec buf_iovec[200];
-            memset(buf_iovec, 0, sizeof buf_iovec);
+	    memset(buf_iovec, 0, sizeof buf_iovec);
             write_attr.local_buf_iovcnt = usr_par.num_sges;
             write_attr.local_buf_iovec  = buf_iovec;
 
             size_t  portion_size;
-            portion_size = (usr_par.size / usr_par.num_sges) & 0xFFFFFFF8; /*8 alighned*/
+            portion_size = (usr_par.size / usr_par.num_sges) & 0xFFFFFFC0; /* 64 byte aligned */
             for (i = 0; i < usr_par.num_sges; i++) {
                 buf_iovec[i].iov_base = buff + (i * portion_size);
                 buf_iovec[i].iov_len  = portion_size;
