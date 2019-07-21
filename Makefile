@@ -5,11 +5,17 @@ ODIR = obj
 ifeq ($(USE_CUDA),1)
   CUDAFLAGS = -I/usr/local/cuda-10.1/targets/x86_64-linux/include
   CUDAFLAGS += -I/usr/local/cuda/include
-  CFLAGS = -I$(IDIR) $(CUDAFLAGS) -g -DHAVE_CUDA
+  PRE_CFLAGS1 = -I$(IDIR) $(CUDAFLAGS) -g -DHAVE_CUDA
   LIBS = -Wall -lrdmacm -libverbs -lmlx5 -lcuda
 else
-  CFLAGS = -I$(IDIR) -g
+  PRE_CFLAGS1 = -I$(IDIR) -g
   LIBS = -Wall -lrdmacm -libverbs -lmlx5
+endif
+
+ifeq ($(PRINT_LAT),1)
+  CFLAGS = $(PRE_CFLAGS1) -DPRINT_LATENCY
+else
+  CFLAGS = $(PRE_CFLAGS1)
 endif
 
 OEXE_CLT = write_to_gpu_client

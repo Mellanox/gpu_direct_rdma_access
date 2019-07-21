@@ -77,6 +77,15 @@ struct wr_id_reported {
     uint32_t    num_wrs;
 };
 
+#ifdef PRINT_LATENCY
+struct wr_latency {
+    uint64_t    wr_start_ts;
+    uint64_t    wr_complete_ts;
+    uint64_t    completion_ts;
+    uint64_t    read_comp_ts;
+};
+#endif /*PRINT_LATENCY*/
+
 struct rdma_device {
 
     struct rdma_event_channel *cm_channel;
@@ -84,7 +93,11 @@ struct rdma_device {
 
     struct ibv_context *context;
     struct ibv_pd      *pd;
+#ifdef PRINT_LATENCY
+    struct ibv_cq_ex   *cq;
+#else
     struct ibv_cq      *cq;
+#endif
     struct ibv_srq     *srq; /* for DCT (client) only, for DCI (server) this is NULL */
     struct ibv_qp      *qp;
     struct ibv_qp_ex       *qpex;  /* DCI (server) only */
@@ -105,6 +118,20 @@ struct rdma_device {
 
     /* AH hash */
     khash_t(kh_ib_ah)   ah_hash;
+#ifdef PRINT_LATENCY
+    uint64_t            hca_core_clock_kHz;
+    struct wr_latency   latency[SEND_Q_DEPTH];
+    uint64_t    measure_index;
+    uint64_t    wr_complete_latency_sum; /*from wr_start_ts*/
+    uint64_t    completion_latency_sum; /*from wr_start_ts*/
+    uint64_t    read_comp_latency_sum; /*from completion_ts*/
+    uint64_t    min_wr_complete_latency;
+    uint64_t    min_completion_latency;
+    uint64_t    min_read_comp_latency;
+    uint64_t    max_wr_complete_latency;
+    uint64_t    max_completion_latency;
+    uint64_t    max_read_comp_latency;
+#endif /*PRINT_LATENCY*/
 };
 
 struct rdma_buffer {
@@ -444,8 +471,22 @@ struct rdma_device *rdma_open_device_target(struct sockaddr *addr) /* client */
     DEBUG_LOG("created pd %p\n", rdma_dev->pd);
 
     /* **********************************  Create CQ  ********************************** */
+#ifdef PRINT_LATENCY
+	struct ibv_cq_init_attr_ex cq_attr_ex;
+	
+    memset(&cq_attr_ex, 0, sizeof(cq_attr_ex));
+	cq_attr_ex.cqe = CQ_DEPTH;
+	cq_attr_ex.cq_context = rdma_dev;
+	cq_attr_ex.channel = NULL;
+	cq_attr_ex.comp_vector = 0;
+	cq_attr_ex.wc_flags = IBV_WC_EX_WITH_COMPLETION_TIMESTAMP;
+
+    DEBUG_LOG ("ibv_create_cq_ex(rdma_dev->context = %p, &cq_attr_ex)\n", rdma_dev->context);
+	rdma_dev->cq = ibv_create_cq_ex(rdma_dev->context, &cq_attr_ex);
+#else /*PRINT_LATENCY*/
     DEBUG_LOG ("ibv_create_cq(%p, %d, NULL, NULL, 0)\n", rdma_dev->context, CQ_DEPTH);
-    rdma_dev->cq = ibv_create_cq(rdma_dev->context, CQ_DEPTH, NULL, NULL, 0);
+    rdma_dev->cq = ibv_create_cq(rdma_dev->context, CQ_DEPTH, NULL, NULL /*comp. events channel*/, 0);
+#endif /*PRINT_LATENCY*/
     if (!rdma_dev->cq) {
         fprintf(stderr, "Couldn't create CQ\n");
         goto clean_pd;
@@ -473,8 +514,13 @@ struct rdma_device *rdma_open_device_target(struct sockaddr *addr) /* client */
     memset(&attr_dv, 0, sizeof(attr_dv));
 
     attr_ex.qp_type = IBV_QPT_DRIVER;
+#ifdef PRINT_LATENCY
+    attr_ex.send_cq = ibv_cq_ex_to_cq(rdma_dev->cq);
+    attr_ex.recv_cq = ibv_cq_ex_to_cq(rdma_dev->cq);
+#else /*PRINT_LATENCY*/
     attr_ex.send_cq = rdma_dev->cq;
     attr_ex.recv_cq = rdma_dev->cq;
+#endif /*PRINT_LATENCY*/
 
     attr_ex.comp_mask |= IBV_QP_INIT_ATTR_PD;
     attr_ex.pd = rdma_dev->pd;
@@ -527,6 +573,26 @@ struct rdma_device *rdma_open_device_target(struct sockaddr *addr) /* client */
     DEBUG_LOG("init AH cache\n");
     kh_init_inplace(kh_ib_ah, &rdma_dev->ah_hash);
 
+#ifdef PRINT_LATENCY
+    struct ibv_device_attr_ex           device_attr_ex = {};
+    //struct ibv_query_device_ex_input    query_device_ex_input = {
+    //    .comp_masc = ...
+    //}
+    
+    ret_val = ibv_query_device_ex(rdma_dev->context, /*struct ibv_query_device_ex_input*/NULL, &device_attr_ex);
+    if (ret_val) {
+        fprintf(stderr, "ibv_query_device_ex failed\n");
+        goto clean_qp;
+    }
+    if (!device_attr_ex.hca_core_clock) {
+        fprintf(stderr, "hca_core_clock = 0\n");
+        goto clean_qp;
+    }
+
+    rdma_dev->hca_core_clock_kHz = device_attr_ex.hca_core_clock;
+    DEBUG_LOG("hca_core_clock = %d kHz\n", rdma_dev->hca_core_clock_kHz);
+#endif /*PRINT_LATENCY*/
+    
     return rdma_dev;
 
 clean_qp:
@@ -541,7 +607,11 @@ clean_srq:
 
 clean_cq:
     if (rdma_dev->cq) {
+#ifdef PRINT_LATENCY
+        ibv_destroy_cq(ibv_cq_ex_to_cq(rdma_dev->cq));
+#else /*PRINT_LATENCY*/
         ibv_destroy_cq(rdma_dev->cq);
+#endif /*PRINT_LATENCY*/
     }
 
 clean_pd:
@@ -591,8 +661,22 @@ struct rdma_device *rdma_open_device_source(struct sockaddr *addr) /* server */
     /* We don't create completion events channel (ibv_create_comp_channel), we prefer working in polling mode */
     
     /* **********************************  Create CQ  ********************************** */
+#ifdef PRINT_LATENCY
+	struct ibv_cq_init_attr_ex cq_attr_ex;
+	
+    memset(&cq_attr_ex, 0, sizeof(cq_attr_ex));
+	cq_attr_ex.cqe = CQ_DEPTH;
+	cq_attr_ex.cq_context = rdma_dev;
+	cq_attr_ex.channel = NULL;
+	cq_attr_ex.comp_vector = 0;
+	cq_attr_ex.wc_flags = IBV_WC_EX_WITH_COMPLETION_TIMESTAMP;
+
+    DEBUG_LOG ("ibv_create_cq_ex(rdma_dev->context = %p, &cq_attr_ex)\n", rdma_dev->context);
+	rdma_dev->cq = ibv_create_cq_ex(rdma_dev->context, &cq_attr_ex);
+#else /*PRINT_LATENCY*/
     DEBUG_LOG ("ibv_create_cq(%p, %d, NULL, NULL, 0)\n", rdma_dev->context, CQ_DEPTH);
     rdma_dev->cq = ibv_create_cq(rdma_dev->context, CQ_DEPTH, NULL, NULL /*comp. events channel*/, 0);
+#endif /*PRINT_LATENCY*/
     if (!rdma_dev->cq) {
         fprintf(stderr, "Couldn't create CQ\n");
         goto clean_pd;
@@ -609,8 +693,13 @@ struct rdma_device *rdma_open_device_source(struct sockaddr *addr) /* server */
     memset(&attr_dv, 0, sizeof(attr_dv));
 
     attr_ex.qp_type = IBV_QPT_DRIVER;
+#ifdef PRINT_LATENCY
+    attr_ex.send_cq = ibv_cq_ex_to_cq(rdma_dev->cq);
+    attr_ex.recv_cq = ibv_cq_ex_to_cq(rdma_dev->cq);
+#else /*PRINT_LATENCY*/
     attr_ex.send_cq = rdma_dev->cq;
     attr_ex.recv_cq = rdma_dev->cq;
+#endif /*PRINT_LATENCY*/
 
     attr_ex.comp_mask |= IBV_QP_INIT_ATTR_PD;
     attr_ex.pd = rdma_dev->pd;
@@ -683,6 +772,30 @@ struct rdma_device *rdma_open_device_source(struct sockaddr *addr) /* server */
     DEBUG_LOG("init AH cache\n");
     kh_init_inplace(kh_ib_ah, &rdma_dev->ah_hash);
     
+#ifdef PRINT_LATENCY
+    struct ibv_device_attr_ex           device_attr_ex = {};
+    //struct ibv_query_device_ex_input    query_device_ex_input = {
+    //    .comp_masc = ...
+    //}
+    
+    ret_val = ibv_query_device_ex(rdma_dev->context, /*struct ibv_query_device_ex_input*/NULL, &device_attr_ex);
+    if (ret_val) {
+        fprintf(stderr, "ibv_query_device_ex failed\n");
+        goto clean_qp;
+    }
+    if (!device_attr_ex.hca_core_clock) {
+        fprintf(stderr, "hca_core_clock = 0\n");
+        goto clean_qp;
+    }
+
+    rdma_dev->hca_core_clock_kHz = device_attr_ex.hca_core_clock;
+    DEBUG_LOG("hca_core_clock = %d kHz\n", rdma_dev->hca_core_clock_kHz);
+
+    rdma_dev->min_wr_complete_latency = 0x8FFFFFFFFFFFFFFF;
+    rdma_dev->min_completion_latency = 0x8FFFFFFFFFFFFFFF;
+    rdma_dev->min_read_comp_latency = 0x8FFFFFFFFFFFFFFF;
+#endif /*PRINT_LATENCY*/
+    
     return rdma_dev;
 
 clean_qp:
@@ -692,7 +805,11 @@ clean_qp:
 
 clean_cq:
     if (rdma_dev->cq) {
+#ifdef PRINT_LATENCY
+        ibv_destroy_cq(ibv_cq_ex_to_cq(rdma_dev->cq));
+#else /*PRINT_LATENCY*/
         ibv_destroy_cq(rdma_dev->cq);
+#endif /*PRINT_LATENCY*/
     }
 
 clean_pd:
@@ -720,6 +837,27 @@ void rdma_close_device(struct rdma_device *rdma_dev)
                 rdma_dev->rdma_buff_cnt);
         return;
     }
+#ifdef PRINT_LATENCY
+    if (rdma_dev->measure_index) {
+        DEBUG_LOG("PRINT_LATENCY: %6lu wr-s, wr_sent latency: min %8lu, max %8lu, avg %8lu (nSec)\n",
+                  rdma_dev->measure_index,
+                  rdma_dev->min_wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                  rdma_dev->max_wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                  rdma_dev->wr_complete_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
+
+        DEBUG_LOG("PRINT_LATENCY:   completion latency        : min %8lu, max %8lu, avg %8lu (nSec)\n",
+                  rdma_dev->min_completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                  rdma_dev->max_completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                  rdma_dev->completion_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
+
+        DEBUG_LOG("PRINT_LATENCY:   read_comp latency         : min %8lu, max %8lu, avg %8lu (nSec)\n",
+                  rdma_dev->min_read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                  rdma_dev->max_read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                  rdma_dev->read_comp_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
+
+        fflush(stdout);
+    }
+#endif /*PRINT_LATENCY*/
     DEBUG_LOG("ibv_destroy_qp(%p)\n", rdma_dev->qp);
     ret_val = ibv_destroy_qp(rdma_dev->qp);
     if (ret_val) {
@@ -737,7 +875,11 @@ void rdma_close_device(struct rdma_device *rdma_dev)
     }
     
     DEBUG_LOG("ibv_destroy_cq(%p)\n", rdma_dev->cq);
-    ret_val = ibv_destroy_cq(rdma_dev->cq);
+#ifdef PRINT_LATENCY
+    ibv_destroy_cq(ibv_cq_ex_to_cq(rdma_dev->cq));
+#else /*PRINT_LATENCY*/
+    ibv_destroy_cq(rdma_dev->cq);
+#endif /*PRINT_LATENCY*/
     if (ret_val) {
         fprintf(stderr, "Couldn't destroy CQ, error %d\n", ret_val);
         return;
@@ -1027,6 +1169,18 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     /* RDMA Write for DCI connect, this will create cqe->ts_start */
     DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_start: qpex = %p\n", rdma_dev->qpex);
     ibv_wr_start(rdma_dev->qpex);
+#ifdef PRINT_LATENCY
+    struct ibv_values_ex ts_values = {
+        .comp_mask = IBV_VALUES_MASK_RAW_CLOCK,
+        .raw_clock = {} /*struct timespec*/
+    };
+
+    ret_val = ibv_query_rt_values_ex(rdma_dev->context, &ts_values);
+    if (ret_val) {
+        fprintf(stderr, "ibv_query_rt_values_ex failed after ibv_wr_start call\n");
+        return 1;
+    }
+#endif /*PRINT_LATENCY*/
 
     // The following code should be atomic operation
     int wr_id_idx = rdma_dev->app_wr_id_idx++;
@@ -1035,16 +1189,20 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     }
     // end of atomic operation
 
+#ifdef PRINT_LATENCY
+    rdma_dev->latency[wr_id_idx].wr_start_ts = ts_values.raw_clock.tv_nsec; /*the value in hca clocks*/
+#endif /*PRINT_LATENCY*/
+
     // update internal wr_id DB
     rdma_dev->qp_available_wr -= required_wr;
     rdma_dev->app_wr_id[wr_id_idx].num_wrs = required_wr;
 
     if (attr->local_buf_iovcnt) {
         int i, start_i = 0;
-	struct ibv_sge sg_list[MAX_SEND_SGE];
-	uint64_t curr_rem_addr = (uint64_t)rem_buf_addr;
-	int num_sges_to_send = attr->local_buf_iovcnt;
-	int curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
+        struct ibv_sge sg_list[MAX_SEND_SGE];
+        uint64_t curr_rem_addr = (uint64_t)rem_buf_addr;
+        int num_sges_to_send = attr->local_buf_iovcnt;
+        int curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
 
         while (num_sges_to_send > 0) {
             rdma_dev->app_wr_id[wr_id_idx].wr_id = attr->wr_id;
@@ -1098,6 +1256,14 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
         DEBUG_LOG_FAST_PATH("FAILURE: ibv_wr_complete (error=%d\n", ret_val);
         return ret_val;
     }
+#ifdef PRINT_LATENCY
+    ret_val = ibv_query_rt_values_ex(rdma_dev->context, &ts_values);
+    if (ret_val) {
+        fprintf(stderr, "ibv_query_rt_values_ex failed after ibv_wr_start call\n");
+        return 1;
+    }
+    rdma_dev->latency[wr_id_idx].wr_complete_ts = ts_values.raw_clock.tv_nsec; /*the value in hca clocks*/
+#endif /*PRINT_LATENCY*/
     
     return ret_val;
 }
@@ -1107,9 +1273,7 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
                           struct rdma_completion_event  *event,
                           uint32_t                      num_entries)
 {
-    struct ibv_wc wc[COMP_ARRAY_SIZE];
-    int    reported_entries = 0,
-           i, wcn;
+    int    reported_entries = 0;
 
     if (num_entries > COMP_ARRAY_SIZE){
         num_entries = COMP_ARRAY_SIZE; /* We don't returne more than 16 entries,
@@ -1118,22 +1282,114 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
 
     /* Polling completion queue */
     //DEBUG_LOG_FAST_PATH("Polling completion queue: ibv_poll_cq\n");
+#ifdef PRINT_LATENCY
+    struct ibv_poll_cq_attr cq_attr = {};
+    uint64_t comp_ts;
+    int      ret_val;
+
+    ret_val = ibv_start_poll(rdma_dev->cq, &cq_attr);
+    if ((ret_val) && (ret_val != ENOENT)) {
+        perror("ibv_start_poll");
+        return reported_entries; /*0*/
+    }
+    
+    while (ret_val != ENOENT)
+    {
+        uint64_t cq_wr_id = rdma_dev->cq->wr_id;
+        DEBUG_LOG_FAST_PATH("virtual wr_id %llu, original wr_id 0x%llx, num_wrs=%d\n",
+                            (long long unsigned int)cq_wr_id,
+                            (long long unsigned int)rdma_dev->app_wr_id[cq_wr_id].wr_id,
+                            rdma_dev->app_wr_id[cq_wr_id].num_wrs);
+        rdma_dev->qp_available_wr += rdma_dev->app_wr_id[cq_wr_id].num_wrs;
+        event[reported_entries].wr_id  = rdma_dev->app_wr_id[cq_wr_id].wr_id;
+        event[reported_entries].status = rdma_dev->cq->status;
+        reported_entries++;
+        
+        rdma_dev->latency[cq_wr_id].completion_ts = ibv_wc_read_completion_ts(rdma_dev->cq);
+        
+        struct ibv_values_ex ts_values = {
+            .comp_mask = IBV_VALUES_MASK_RAW_CLOCK,
+            .raw_clock = {} /*struct timespec*/
+        };
+
+        ret_val = ibv_query_rt_values_ex(rdma_dev->context, &ts_values);
+        if (ret_val) {
+            fprintf(stderr, "ibv_query_rt_values_ex failed after ibv_wr_start call\n");
+            ts_values.raw_clock.tv_nsec = 0;
+        }
+        rdma_dev->latency[cq_wr_id].read_comp_ts = ts_values.raw_clock.tv_nsec;
+
+        uint64_t    wr_complete_latency = rdma_dev->latency[cq_wr_id].wr_complete_ts - rdma_dev->latency[cq_wr_id].wr_start_ts;
+        uint64_t    completion_latency  = rdma_dev->latency[cq_wr_id].completion_ts  - rdma_dev->latency[cq_wr_id].wr_start_ts;
+        uint64_t    read_comp_latency   = rdma_dev->latency[cq_wr_id].read_comp_ts   - rdma_dev->latency[cq_wr_id].completion_ts;
+        
+        rdma_dev->measure_index++;
+        rdma_dev->wr_complete_latency_sum += wr_complete_latency;
+        rdma_dev->completion_latency_sum  += completion_latency;
+        rdma_dev->read_comp_latency_sum   += read_comp_latency;
+
+        rdma_dev->min_wr_complete_latency = (wr_complete_latency < rdma_dev->min_wr_complete_latency)?
+                                            wr_complete_latency: rdma_dev->min_wr_complete_latency;
+        rdma_dev->min_completion_latency  = (completion_latency < rdma_dev->min_completion_latency)?
+                                            completion_latency: rdma_dev->min_completion_latency;
+        rdma_dev->min_read_comp_latency   = (read_comp_latency < rdma_dev->min_read_comp_latency)?
+                                            read_comp_latency: rdma_dev->min_read_comp_latency;
+        
+        rdma_dev->max_wr_complete_latency = (wr_complete_latency > rdma_dev->max_wr_complete_latency)?
+                                            wr_complete_latency: rdma_dev->max_wr_complete_latency;
+        rdma_dev->max_completion_latency  = (completion_latency > rdma_dev->max_completion_latency)?
+                                            completion_latency: rdma_dev->max_completion_latency;
+        rdma_dev->max_read_comp_latency   = (read_comp_latency > rdma_dev->max_read_comp_latency)?
+                                            read_comp_latency: rdma_dev->max_read_comp_latency;
+        
+        DEBUG_LOG_FAST_PATH("PRINT_LATENCY: wr_id = %6lu, wr_sent latency: current %8lu, min %8lu, max %8lu, avg %8lu (nSec)\n",
+                            cq_wr_id,
+                            wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                            rdma_dev->min_wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                            rdma_dev->max_wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                            rdma_dev->wr_complete_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
+
+        DEBUG_LOG_FAST_PATH("PRINT_LATENCY:   completion latency           : current %8lu, min %8lu, max %8lu, avg %8lu (nSec)\n",
+                            completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                            rdma_dev->min_completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                            rdma_dev->max_completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                            rdma_dev->completion_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
+        
+        DEBUG_LOG_FAST_PATH("PRINT_LATENCY:   read_comp latency            : current %8lu, min %8lu, max %8lu, avg %8lu (nSec)\n",
+                            read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                            rdma_dev->min_read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                            rdma_dev->max_read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+                            rdma_dev->read_comp_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
+
+
+        ret_val = ibv_next_poll(rdma_dev->cq);
+        if ((ret_val) && (ret_val != ENOENT)) {
+            perror("ibv_start_poll");
+            return reported_entries;
+        }
+    }
+    ibv_end_poll(rdma_dev->cq);
+#else /*PRINT_LATENCY*/
+    struct ibv_wc wc[COMP_ARRAY_SIZE];
+    int    i, wcn;
+    
     wcn = ibv_poll_cq(rdma_dev->cq, num_entries, wc);
     if (wcn < 0) {
         fprintf(stderr, "poll CQ failed %d\n", wcn);
         return 0;
     }
-
+    
     for (i = 0; i < wcn; ++i) {
         DEBUG_LOG_FAST_PATH("cqe idx %d: virtual wr_id %llu, original wr_id 0x%llx, num_wrs=%d\n",
                             i, (long long unsigned int)wc[i].wr_id,
                             (long long unsigned int)rdma_dev->app_wr_id[wc[i].wr_id].wr_id,
-				rdma_dev->app_wr_id[wc[i].wr_id].num_wrs);
-            rdma_dev->qp_available_wr += rdma_dev->app_wr_id[wc[i].wr_id].num_wrs;
-            event[reported_entries].wr_id  = rdma_dev->app_wr_id[wc[i].wr_id].wr_id;
-            event[reported_entries].status = wc[i].status;
-            reported_entries++;
+                            rdma_dev->app_wr_id[wc[i].wr_id].num_wrs);
+        rdma_dev->qp_available_wr += rdma_dev->app_wr_id[wc[i].wr_id].num_wrs;
+        event[reported_entries].wr_id  = rdma_dev->app_wr_id[wc[i].wr_id].wr_id;
+        event[reported_entries].status = wc[i].status;
+        reported_entries++;
     }
+#endif /*PRINT_LATENCY*/
     return reported_entries;
 }
 
