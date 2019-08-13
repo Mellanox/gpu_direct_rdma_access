@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -62,12 +63,20 @@ extern int debug_fast_path;
 
 struct user_params {
 
+    int                 persistent;
     int                 port;
     unsigned long       size;
     int                 iters;
     int                 num_sges;
     struct sockaddr     hostaddr;
 };
+
+static volatile int keep_running = 1;
+
+void sigint_handler(int dummy)
+{
+    keep_running = 0;
+}
 
 /****************************************************************************************
  * Open temporary socket connection on the server side, listening to the client.
@@ -138,6 +147,7 @@ static void usage(const char *argv0)
     printf("  %s            start a server and wait for connection\n", argv0);
     printf("\n");
     printf("Options:\n");
+    printf("  -P, --persistent          server waits for additional client connections after tranfer is completed\n");
     printf("  -a, --addr=<ipaddr>       ip address of the local host net device <ipaddr v4> (mandatory)\n");
     printf("  -p, --port=<port>         listen on/connect to port <port> (default 18515)\n");
     printf("  -s, --size=<size>         size of message to exchange (default 4096)\n");
@@ -159,6 +169,7 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
         int c;
 
         static struct option long_options[] = {
+            { .name = "persistent",    .has_arg = 0, .val = 'P' },
             { .name = "addr",          .has_arg = 1, .val = 'a' },
             { .name = "port",          .has_arg = 1, .val = 'p' },
             { .name = "size",          .has_arg = 1, .val = 's' },
@@ -168,13 +179,17 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             { 0 }
         };
 
-        c = getopt_long(argc, argv, "a:p:s:n:l:D:",
+        c = getopt_long(argc, argv, "Pa:p:s:n:l:D:",
                         long_options, NULL);
         
         if (c == -1)
             break;
 
         switch (c) {
+
+        case 'P':
+            usr_par->persistent = 1;
+            break;
 
         case 'a':
             get_addr(optarg, (struct sockaddr *) &usr_par->hostaddr);
@@ -236,24 +251,15 @@ int main(int argc, char *argv[])
         return ret_val;
     }
 
-    printf("Listening to remote client...\n");
-    sockfd = open_server_socket(usr_par.port);
-    if (sockfd < 0) {
-        return 1;
-    }
-    printf("Connection accepted.\n");
-
     rdma_dev = rdma_open_device_source(&usr_par.hostaddr); /* server */
     if (!rdma_dev) {
         ret_val = 1;
-        goto clean_socket;
+        return ret_val;
     }
     
     /* Local memory buffer allocation */
-    void    *buff;
-    
-    buff = work_buffer_alloc(usr_par.size, 0 /*use_cuda*/, NULL);
-            /* On the server side, we allocate buffer on CPU and not on GPU */
+    /* On the server side, we allocate buffer on CPU and not on GPU */
+    void *buff = work_buffer_alloc(usr_par.size, 0 /*use_cuda*/, NULL);
     if (!buff) {
         ret_val = 1;
         goto clean_device;
@@ -267,16 +273,28 @@ int main(int argc, char *argv[])
         goto clean_mem_buff;
     }
 
+    struct sigaction act;
+    act.sa_handler = sigint_handler;
+    sigaction(SIGINT, &act, NULL);
+
+sock_listen:
+    printf("Listening to remote client...\n");
+    sockfd = open_server_socket(usr_par.port);
+    if (sockfd < 0) {
+        goto clean_rdma_buff;
+    }
+    printf("Connection accepted.\n");
+
     if (gettimeofday(&start, NULL)) {
         perror("gettimeofday");
         ret_val = 1;
-        goto clean_rdma_buff;
+        goto clean_socket;
     }
  
     /****************************************************************************************************
      * The main loop where we client and server send and receive "iters" number of messages
      */
-    for (cnt = 0; cnt < usr_par.iters; cnt++) {
+    for (cnt = 0; cnt < usr_par.iters && keep_running; cnt++) {
 
         int     r_size;
         char    desc_str[sizeof "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10"];
@@ -291,7 +309,7 @@ int main(int argc, char *argv[])
         if (r_size != sizeof desc_str) {
             fprintf(stderr, "Couldn't receive RDMA data for iteration %d\n", cnt);
             ret_val = 1;
-            goto clean_rdma_buff;
+            goto clean_socket;
         }
         DEBUG_LOG_FAST_PATH("Received message \"%s\"\n", desc_str);
         memset(&write_attr, 0, sizeof write_attr);
@@ -307,7 +325,7 @@ int main(int argc, char *argv[])
             if (usr_par.num_sges > MAX_SGES) {
                 fprintf(stderr, "WARN: num_sges %d is too big (max=%d)\n", usr_par.num_sges, MAX_SGES);
                 ret_val = 1;
-                goto clean_rdma_buff;
+                goto clean_socket;
             }
 	    memset(buf_iovec, 0, sizeof buf_iovec);
             write_attr.local_buf_iovcnt = usr_par.num_sges;
@@ -322,7 +340,7 @@ int main(int argc, char *argv[])
         }
         ret_val = rdma_write_to_peer(&write_attr);
         if (ret_val) {
-            goto clean_rdma_buff;
+            goto clean_socket;
         }
         
         /* Completion queue polling loop */
@@ -332,7 +350,7 @@ int main(int argc, char *argv[])
         do {
             reported_ev += rdma_poll_completions(rdma_dev, &rdma_comp_ev[reported_ev], 10/*expected_comp_events-reported_ev*/);
             //TODO - we can put sleep here
-        } while (reported_ev < 1/*expected_comp_events*/);
+        } while (reported_ev < 1 && keep_running /*expected_comp_events*/);
         DEBUG_LOG_FAST_PATH("Finished polling\n");
 
         for (i = 0; i < reported_ev; ++i) {
@@ -341,7 +359,7 @@ int main(int argc, char *argv[])
                         ibv_wc_status_str(rdma_comp_ev[i].status),
                         rdma_comp_ev[i].status, (int) rdma_comp_ev[i].wr_id);
                 ret_val = 1;
-                goto clean_rdma_buff;
+                goto clean_socket;
             }
         }
 
@@ -349,15 +367,20 @@ int main(int argc, char *argv[])
         if (write(sockfd, "rdma_write completed", sizeof("rdma_write completed")) != sizeof("rdma_write completed")) {
             fprintf(stderr, "Couldn't send \"rdma_write completed\" msg\n");
             ret_val = 1;
-            goto clean_rdma_buff;
+            goto clean_socket;
         }
     }
     /****************************************************************************************************/
 
     ret_val = print_run_time(start, usr_par.size, usr_par.iters);
     if (ret_val) {
-        goto clean_rdma_buff;
+        goto clean_socket;
     }
+
+clean_socket:
+    close(sockfd);
+    if (usr_par.persistent && keep_running)
+        goto sock_listen;
 
 clean_rdma_buff:
     rdma_buffer_dereg(rdma_buff);
@@ -367,9 +390,6 @@ clean_mem_buff:
 
 clean_device:
     rdma_close_device(rdma_dev);
-
-clean_socket:
-    close(sockfd);
 
     return ret_val;
 }
