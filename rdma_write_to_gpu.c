@@ -67,6 +67,7 @@ int debug_fast_path = 0;
 #define SEND_Q_DEPTH    640 
 #define DC_KEY          0xffeeddcc  /*this is defined for both sides: client and server*/
 #define COMP_ARRAY_SIZE 16
+#define TC_PRIO         3
 
 #define mmin(a, b)      a < b ? a : b
 
@@ -336,7 +337,7 @@ static int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev)
             fprintf(stderr, "can't read GID of index %d, error code %d\n", rdma_dev->gidx, ret_val);
             return 1;
         }
-        DEBUG_LOG ("My GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
+        DEBUG_LOG ("My GID (INDEX: %d): %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n", rdma_dev->gidx,
                    rdma_dev->gid.raw[0], rdma_dev->gid.raw[1], rdma_dev->gid.raw[2], rdma_dev->gid.raw[3],
                    rdma_dev->gid.raw[4], rdma_dev->gid.raw[5], rdma_dev->gid.raw[6], rdma_dev->gid.raw[7], 
                    rdma_dev->gid.raw[8], rdma_dev->gid.raw[9], rdma_dev->gid.raw[10], rdma_dev->gid.raw[11],
@@ -365,6 +366,7 @@ static int modify_target_qp_to_rtr(struct rdma_device *rdma_dev)
         qp_attr.ah_attr.is_global = 1;
         qp_attr.ah_attr.grh.hop_limit  = 1;
         qp_attr.ah_attr.grh.sgid_index = rdma_dev->gidx;
+        qp_attr.ah_attr.grh.traffic_class = TC_PRIO << 5; // <<3 for dscp2prio, <<2 for ECN bits
     }
     attr_mask = IBV_QP_STATE          |
                 IBV_QP_AV             |
@@ -402,6 +404,7 @@ static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev)
         qp_attr.ah_attr.is_global = 1;
         qp_attr.ah_attr.grh.hop_limit  = 1;
         qp_attr.ah_attr.grh.sgid_index = rdma_dev->gidx;
+        qp_attr.ah_attr.grh.traffic_class = TC_PRIO << 5; // <<3 for dscp2prio, <<2 for ECN bits
     }
     attr_mask = IBV_QP_STATE    |
                 IBV_QP_AV       |
@@ -1027,10 +1030,13 @@ static int rdma_create_ah_cached(struct rdma_device *rdma_dev,
     /* looking for existing AH with same attributes */
     iter = kh_get(kh_ib_ah, &rdma_dev->ah_hash, *ah_attr);
     if (iter == kh_end(&rdma_dev->ah_hash)) {
+        int dscp = ah_attr->grh.traffic_class >> 2;
+
         /* new AH */
-        DEBUG_LOG_FAST_PATH("ibv_create_ah(dlid=%d sl=%d port=%d is_g=%d)\n", 
-            ah_attr->dlid, ah_attr->sl, ah_attr->port_num, ah_attr->is_global);
+        DEBUG_LOG("ibv_create_ah(dlid=%d port=%d is_g=%d, dscp=%d(tc=%d))\n",
+            ah_attr->dlid, ah_attr->port_num, ah_attr->is_global, dscp, (dscp>>3));
         *p_ah = ibv_create_ah(rdma_dev->pd, ah_attr);
+
         if (*p_ah == NULL) {
             perror("ibv_create_ah");
             goto out;
@@ -1160,6 +1166,7 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
         ah_attr.grh.hop_limit = 1;
         ah_attr.grh.dgid = rem_gid;
         ah_attr.grh.sgid_index = rdma_dev->gidx;
+        ah_attr.grh.traffic_class = 24 << 2; // Prio 3
     }
 
     if (rdma_create_ah_cached(rdma_dev, &ah_attr, &ah)) {
