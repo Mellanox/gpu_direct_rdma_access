@@ -91,7 +91,7 @@ static int open_client_socket(const char *servername,
     ret_val = getaddrinfo(servername, service, &hints, &res);
 
     if (ret_val < 0) {
-        fprintf(stderr, "%s for %s:%d\n", gai_strerror(ret_val), servername, port);
+        fprintf(stderr, "FAILURE: %s for %s:%d\n", gai_strerror(ret_val), servername, port);
         free(service);
         return -1;
     }
@@ -110,7 +110,7 @@ static int open_client_socket(const char *servername,
     free(service);
 
     if (sockfd < 0) {
-        fprintf(stderr, "Couldn't connect to %s:%d\n", servername, port);
+        fprintf(stderr, "FAILURE: Couldn't connect to %s:%d\n", servername, port);
         return -1;
     }
 
@@ -185,7 +185,7 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             usr_par->use_cuda = 1;
             usr_par->bdf = calloc(1, strlen(optarg)+1);
             if (!usr_par->bdf){
-                perror("BDF mem alloc failure");
+                fprintf(stderr, "FAILURE: BDF mem alloc failure (errno=%d '%m')", errno);
                 return 1;
             }
             strcpy(usr_par->bdf, optarg);
@@ -203,14 +203,14 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
     }
 
     if (optind == argc) {
-        fprintf(stderr, "Server name is missing in the commant line.\n");
+        fprintf(stderr, "FAILURE: Server name is missing in the commant line.\n");
         usage(argv[0]);
         return 1;
     } else if (optind == argc - 1) {
         //usr_par->servername = strdupa(argv[optind]);
         usr_par->servername = calloc(1, strlen(argv[optind])+1);
         if (!usr_par->servername){
-            perror("servername mem alloc failure");
+            fprintf(stderr, "FAILURE: servername mem alloc failure (errno=%d '%m')", errno);
             return 1;
         }
         strcpy(usr_par->servername, argv[optind]);
@@ -243,7 +243,7 @@ int main(int argc, char *argv[])
     }
     
     if (!usr_par.hostaddr.sa_family) {
-        fprintf(stderr, "host ip address is missing in the command line.");
+        fprintf(stderr, "FAILURE: host ip address is missing in the command line.");
         usage(argv[0]);
         ret_val = 1;
         goto clean_usr_par;
@@ -297,7 +297,7 @@ int main(int argc, char *argv[])
     
     printf("Starting data requests (%d iters)\n", usr_par.iters);
     if (gettimeofday(&start, NULL)) {
-        perror("gettimeofday");
+        fprintf(stderr, "FAILURE: gettimeofday (errno=%d '%m')", errno);
         ret_val = 1;
         goto clean_rdma_buff;
     }
@@ -314,8 +314,7 @@ int main(int argc, char *argv[])
         DEBUG_LOG_FAST_PATH("Send message N %d: buffer desc \"%s\" of size %d\n", cnt, desc_str, ret_desc_str_size);
         ret_size = write(sockfd, desc_str, ret_desc_str_size);
         if (ret_size != ret_desc_str_size) {
-            perror("client write");
-            fprintf(stderr, "Couldn't send RDMA data for iteration, write data size %d\n", ret_size);
+            fprintf(stderr, "FAILURE: Couldn't send RDMA data for iteration, write data size %d (errno=%d '%m')\n", ret_size, errno);
             ret_val = 1;
             goto clean_rdma_buff;
         }
@@ -323,8 +322,7 @@ int main(int argc, char *argv[])
         // Wating for confirmation message from the socket that rdma_write from the server has beed completed
         ret_size = recv(sockfd, ackmsg, sizeof ackmsg, MSG_WAITALL);
         if (ret_size != sizeof ackmsg) {
-            perror("client read");
-            fprintf(stderr, "Couldn't read \"rdma_write completed\" message, recv data size %d\n", ret_size);
+            fprintf(stderr, "FAILURE: Couldn't read \"rdma_write completed\" message, recv data size %d (errno=%d '%m')\n", ret_size, errno);
             ret_val = 1;
             goto clean_rdma_buff;
         }

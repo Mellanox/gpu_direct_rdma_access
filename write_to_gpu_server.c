@@ -307,7 +307,7 @@ sock_listen:
         DEBUG_LOG_FAST_PATH("Iteration %d: Waiting to Receive message of size %lu\n", cnt, sizeof desc_str);
         r_size = recv(sockfd, desc_str, sizeof desc_str, MSG_WAITALL);
         if (r_size != sizeof desc_str) {
-            fprintf(stderr, "Couldn't receive RDMA data for iteration %d\n", cnt);
+            fprintf(stderr, "FAILURE: Couldn't receive RDMA data for iteration %d (errno=%d '%m')\n", cnt, errno);
             ret_val = 1;
             goto clean_socket;
         }
@@ -355,7 +355,7 @@ sock_listen:
 
         for (i = 0; i < reported_ev; ++i) {
             if (rdma_comp_ev[i].status != IBV_WC_SUCCESS) {
-                fprintf(stderr, "Failed status \"%s\" (%d) for wr_id %d\n",
+                fprintf(stderr, "FAILURE: status \"%s\" (%d) for wr_id %d\n",
                         ibv_wc_status_str(rdma_comp_ev[i].status),
                         rdma_comp_ev[i].status, (int) rdma_comp_ev[i].wr_id);
                 ret_val = 1;
@@ -365,7 +365,7 @@ sock_listen:
 
         // Sending ack-message to the client, confirming that RDMA write has been completet
         if (write(sockfd, "rdma_write completed", sizeof("rdma_write completed")) != sizeof("rdma_write completed")) {
-            fprintf(stderr, "Couldn't send \"rdma_write completed\" msg\n");
+            fprintf(stderr, "FAILURE: Couldn't send \"rdma_write completed\" msg (errno=%d '%m')\n", errno);
             ret_val = 1;
             goto clean_socket;
         }
