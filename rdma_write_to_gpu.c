@@ -253,6 +253,7 @@ static struct ibv_context *open_ib_device_by_addr(struct rdma_device *rdma_dev, 
     }
 
     rdma_dev->ib_port = rdma_dev->cm_id->port_num;
+    rdma_dev->gidx = -1;
 
     DEBUG_LOG("bound to RDMA device name:%s, port:%d, based on '%s'\n",
               rdma_dev->cm_id->verbs->device->name, rdma_dev->cm_id->port_num, str); 
@@ -319,7 +320,7 @@ static int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev)
         return 1;
     }
 
-    if ( rdma_dev->cm_id && portinfo.link_layer == IBV_LINK_LAYER_ETHERNET) {
+    if (rdma_dev->cm_id && portinfo.link_layer == IBV_LINK_LAYER_ETHERNET) {
         rdma_dev->gidx = ibv_find_sgid_type(rdma_dev->context, rdma_dev->ib_port, 
                 IBV_GID_TYPE_ROCE_V2, rdma_dev->cm_id->route.addr.src_addr.sa_family);
     }
@@ -337,13 +338,18 @@ static int rdma_set_lid_gid_from_port_info(struct rdma_device *rdma_dev)
             fprintf(stderr, "can't read GID of index %d, error code %d\n", rdma_dev->gidx, ret_val);
             return 1;
         }
-        DEBUG_LOG ("My GID (INDEX: %d): %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n", rdma_dev->gidx,
+        DEBUG_LOG ("my gid idx: %d, value:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n", rdma_dev->gidx,
                    rdma_dev->gid.raw[0], rdma_dev->gid.raw[1], rdma_dev->gid.raw[2], rdma_dev->gid.raw[3],
                    rdma_dev->gid.raw[4], rdma_dev->gid.raw[5], rdma_dev->gid.raw[6], rdma_dev->gid.raw[7], 
                    rdma_dev->gid.raw[8], rdma_dev->gid.raw[9], rdma_dev->gid.raw[10], rdma_dev->gid.raw[11],
                    rdma_dev->gid.raw[12], rdma_dev->gid.raw[13], rdma_dev->gid.raw[14], rdma_dev->gid.raw[15] );
     }
     rdma_dev->is_global = (rdma_dev->gid.global.interface_id != 0);
+
+    DEBUG_LOG ("link_layer:%s, lid:%d, is_global:%d, MTU:%d Bytes\n",
+        (portinfo.link_layer == IBV_LINK_LAYER_ETHERNET ? "ETH" : "IB"),
+        rdma_dev->lid, rdma_dev->is_global, (256<<(rdma_dev->mtu - 1)));
+
     return 0;
 }
 
@@ -379,7 +385,7 @@ static int modify_target_qp_to_rtr(struct rdma_device *rdma_dev)
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
     }
-    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = 0x%lx\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
     return 0;
 }
@@ -416,7 +422,7 @@ static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev)
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
     }
-    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = 0x%lx\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
     /* - - - - - - -  Modify QP to RTS  - - - - - - - */
     qp_attr.qp_state       = IBV_QPS_RTS;
@@ -437,7 +443,7 @@ static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev)
         fprintf(stderr, "Failed to modify QP to RTS\n");
         return 1;
     }
-    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = 0x%lx\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
     
     return 0;
 }
@@ -463,6 +469,12 @@ struct rdma_device *rdma_open_device_target(struct sockaddr *addr) /* client */
     if (!rdma_dev->context){
         goto clean_rdma_dev;
     }
+
+    ret_val = rdma_set_lid_gid_from_port_info(rdma_dev);
+    if (ret_val) {
+        goto clean_device;
+    }
+
     /****************************************************************************************************/
     
     DEBUG_LOG ("ibv_alloc_pd(ibv_context = %p)\n", rdma_dev->context);
@@ -534,14 +546,14 @@ struct rdma_device *rdma_open_device_target(struct sockaddr *addr) /* client */
     attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCT;
     attr_dv.dc_init_attr.dct_access_key = DC_KEY;
 
-    DEBUG_LOG ("mlx5dv_create_qp(%p,%p,%p)\n", rdma_dev->context, &attr_ex, &attr_dv);
+    DEBUG_LOG ("mlx5dv_create_qp(%p)\n", rdma_dev->context);
     rdma_dev->qp = mlx5dv_create_qp(rdma_dev->context, &attr_ex, &attr_dv);
 
     if (!rdma_dev->qp)  {
         fprintf(stderr, "Couldn't create QP\n");
         goto clean_srq;
     }
-    DEBUG_LOG ("mlx5dv_create_qp %p completed: qp_num = %u\n", rdma_dev->qp, rdma_dev->qp->qp_num);
+    DEBUG_LOG ("mlx5dv_create_qp %p completed: qp_num = 0x%lx\n", rdma_dev->qp, rdma_dev->qp->qp_num);
 
     /* - - - - - - -  Modify QP to INIT  - - - - - - - */
     struct ibv_qp_attr qp_attr = {
@@ -561,12 +573,7 @@ struct rdma_device *rdma_open_device_target(struct sockaddr *addr) /* client */
         fprintf(stderr, "Failed to modify QP to INIT, error %d\n", ret_val);
         goto clean_qp;
     }
-    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
-
-    ret_val = rdma_set_lid_gid_from_port_info(rdma_dev);
-    if (ret_val) {
-        goto clean_qp;
-    }
+    DEBUG_LOG ("ibv_modify_qp to state %d completed: qp_num = 0x%lx\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
     ret_val = modify_target_qp_to_rtr(rdma_dev);
     if (ret_val) {
@@ -653,6 +660,13 @@ struct rdma_device *rdma_open_device_source(struct sockaddr *addr) /* server */
         goto clean_rdma_dev;
     }
     
+    ret_val = rdma_set_lid_gid_from_port_info(rdma_dev);
+    if (ret_val) {
+        goto clean_device;
+    }
+
+    /****************************************************************************************************/
+
     DEBUG_LOG ("ibv_alloc_pd(ibv_context = %p)\n", rdma_dev->context);
     rdma_dev->pd = ibv_alloc_pd(rdma_dev->context);
     if (!rdma_dev->pd) {
@@ -721,9 +735,9 @@ struct rdma_device *rdma_open_device_source(struct sockaddr *addr) /* server */
     attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_QP_CREATE_FLAGS;
     attr_dv.create_flags |= MLX5DV_QP_CREATE_DISABLE_SCATTER_TO_CQE; /*driver doesnt support scatter2cqe data-path on DCI yet*/
     
-    DEBUG_LOG ("mlx5dv_create_qp(%p,%p,%p)\n", rdma_dev->context, &attr_ex, &attr_dv);
+    DEBUG_LOG ("mlx5dv_create_qp(%p)\n", rdma_dev->context);
     rdma_dev->qp = mlx5dv_create_qp(rdma_dev->context, &attr_ex, &attr_dv);
-    DEBUG_LOG ("mlx5dv_create_qp %p completed: qp_num = %u\n", rdma_dev->qp, rdma_dev->qp->qp_num);
+    DEBUG_LOG ("mlx5dv_create_qp %p completed: qp_num = 0x%lx\n", rdma_dev->qp, rdma_dev->qp->qp_num);
 
     if (!rdma_dev->qp)  {
         fprintf(stderr, "Couldn't create QP\n");
@@ -758,12 +772,7 @@ struct rdma_device *rdma_open_device_source(struct sockaddr *addr) /* server */
         fprintf(stderr, "Failed to modify QP to INIT, error %d\n", ret_val);
         goto clean_qp;
     }
-    DEBUG_LOG("ibv_modify_qp to state %d completed: qp_num = %u\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
-
-    ret_val = rdma_set_lid_gid_from_port_info(rdma_dev);
-    if (ret_val) {
-        goto clean_qp;
-    }
+    DEBUG_LOG("ibv_modify_qp to state %d completed: qp_num = 0x%lx\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
 
     ret_val = modify_source_qp_to_rtr_and_rts(rdma_dev);
     if (ret_val) {
@@ -1030,11 +1039,10 @@ static int rdma_create_ah_cached(struct rdma_device *rdma_dev,
     /* looking for existing AH with same attributes */
     iter = kh_get(kh_ib_ah, &rdma_dev->ah_hash, *ah_attr);
     if (iter == kh_end(&rdma_dev->ah_hash)) {
-        int dscp = ah_attr->grh.traffic_class >> 2;
 
         /* new AH */
-        DEBUG_LOG("ibv_create_ah(dlid=%d port=%d is_g=%d, dscp=%d(tc=%d))\n",
-            ah_attr->dlid, ah_attr->port_num, ah_attr->is_global, dscp, (dscp>>3));
+        DEBUG_LOG("ibv_create_ah(dlid=%d port=%d is_global=%d, tc=%d)\n",
+            ah_attr->dlid, ah_attr->port_num, ah_attr->is_global, (ah_attr->grh.traffic_class >> 5));
         *p_ah = ibv_create_ah(rdma_dev->pd, ah_attr);
 
         if (*p_ah == NULL) {
@@ -1166,7 +1174,7 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
         ah_attr.grh.hop_limit = 1;
         ah_attr.grh.dgid = rem_gid;
         ah_attr.grh.sgid_index = rdma_dev->gidx;
-        ah_attr.grh.traffic_class = 24 << 2; // Prio 3
+        ah_attr.grh.traffic_class = TC_PRIO << 5; // <<3 for dscp2prio, <<2 for ECN bits
     }
 
     if (rdma_create_ah_cached(rdma_dev, &ah_attr, &ah)) {
