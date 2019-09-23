@@ -1132,13 +1132,17 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
     if (is_global) {
         wire_gid_to_gid(attr->remote_buf_desc_str + sizeof "0102030405060708:01020304:01020304:0102:010203:1", &rem_gid);
     }
-    DEBUG_LOG_FAST_PATH("rem_buf_addr = 0x%llx, rem_buf_size = 0x%lx, rem_buf_rkey = 0x%lx, rem_lid = 0x%hx, rem_dctn = 0x%lx, is_global = %d\n",
-                        rem_buf_addr, rem_buf_size, rem_buf_rkey, rem_lid, rem_dctn, is_global);
+    DEBUG_LOG_FAST_PATH("rem_buf_addr=0x%llx, rem_buf_size=%u, rem_buf_offset=%u, rem_buf_rkey=0x%lx, rem_lid=0x%hx, rem_dctn=0x%lx, is_global=%d\n",
+                        rem_buf_addr, rem_buf_size, attr->remote_buf_offset, rem_buf_rkey, rem_lid, rem_dctn, is_global);
     DEBUG_LOG_FAST_PATH("Rem GID: %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x\n",
                         rem_gid.raw[0],  rem_gid.raw[1],  rem_gid.raw[2],  rem_gid.raw[3],
                         rem_gid.raw[4],  rem_gid.raw[5],  rem_gid.raw[6],  rem_gid.raw[7], 
                         rem_gid.raw[8],  rem_gid.raw[9],  rem_gid.raw[10], rem_gid.raw[11],
                         rem_gid.raw[12], rem_gid.raw[13], rem_gid.raw[14], rem_gid.raw[15] );
+
+    /* upadte the remote buffer addr and size acording to the requested start offset */
+    rem_buf_addr += attr->remote_buf_offset;
+    rem_buf_size -= attr->remote_buf_offset;
 
     /*
      * Pass attr->local_buf_iovec - local_buf_iovcnt elements and check that
@@ -1238,7 +1242,7 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
                 sg_list[i].lkey   = (uint32_t)attr->local_buf_rdma->mr->lkey;
                 curr_rem_addr += sg_list[i].length;
             }
-            DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge_list(qpex=%p, num_sge=%lu, sg_list=%p), start_i=%d, num_sges_to_send=%d, sg[0].length=%d\n",
+            DEBUG_LOG_FAST_PATH("RDMA Write: ibv_wr_set_sge_list(qpex=%p, num_sge=%lu, sg_list=%p), start_i=%d, num_sges_to_send=%d, sg[0].length=%u\n",
                                 rdma_dev->qpex, (size_t)curr_iovcnt, (void*)sg_list, start_i, num_sges_to_send, sg_list[0].length);
             ibv_wr_set_sge_list(rdma_dev->qpex, (size_t)curr_iovcnt, sg_list);
             num_sges_to_send -= curr_iovcnt;

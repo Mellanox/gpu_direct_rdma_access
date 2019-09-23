@@ -103,6 +103,7 @@ int rdma_buffer_get_desc_str(struct rdma_buffer *buffer, char *desc_str, size_t 
 struct rdma_write_attr {
 	char               *remote_buf_desc_str;
 	size_t              remote_buf_desc_length;
+	size_t              remote_buf_offset;
 	struct rdma_buffer *local_buf_rdma;
 	struct iovec       *local_buf_iovec;
 	int                 local_buf_iovcnt;
@@ -111,7 +112,7 @@ struct rdma_write_attr {
 
 /*
  * Issue a RDMA Write operation from the rdma_device, to a remote buffer which
- * is descibed by the remote_buffer_addr_str.
+ * is descibed by the remote_buffer_addr_str, starting at offset remote_buf_offset.
  * The local_iov gather list, of size local_iovcnt, hold the buffer addr & size
  * pairs, and should be in the range of the local_buffer, which holds relevant
  * the rdma info
