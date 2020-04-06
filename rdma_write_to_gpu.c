@@ -1221,9 +1221,9 @@ int rdma_write_to_peer(struct rdma_write_attr *attr)
         struct ibv_sge sg_list[MAX_SEND_SGE];
         uint64_t curr_rem_addr = (uint64_t)rem_buf_addr;
         int num_sges_to_send = attr->local_buf_iovcnt;
-        int curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
 
         while (num_sges_to_send > 0) {
+            int curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
             rdma_dev->app_wr_id[wr_id_idx].wr_id = attr->wr_id;
             rdma_dev->qpex->wr_id = (uint64_t)wr_id_idx;
             rdma_dev->qpex->wr_flags = num_sges_to_send > MAX_SEND_SGE ? 0 : IBV_SEND_SIGNALED;
