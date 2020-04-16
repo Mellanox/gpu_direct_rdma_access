@@ -18,16 +18,16 @@ else
   CFLAGS = $(PRE_CFLAGS1)
 endif
 
-OEXE_CLT = write_to_gpu_client
-OEXE_SRV = write_to_gpu_server
+OEXE_CLT = client
+OEXE_SRV = server
 
-DEPS = rdma_write_to_gpu.h
+DEPS = gpu_direct_rdma_access.h
 DEPS += ibv_helper.h
 DEPS += khash.h
 DEPS += gpu_mem_util.h
 DEPS += utils.h
 
-OBJS = rdma_write_to_gpu.o
+OBJS = gpu_direct_rdma_access.o
 OBJS += gpu_mem_util.o
 OBJS += utils.o
 
@@ -38,10 +38,10 @@ all : make_odir $(OEXE_CLT) $(OEXE_SRV)
 
 make_odir: $(ODIR)/
 
-$(OEXE_SRV) : $(patsubst %,$(ODIR)/%,$(OBJS)) $(ODIR)/write_to_gpu_server.o
+$(OEXE_SRV) : $(patsubst %,$(ODIR)/%,$(OBJS)) $(ODIR)/server.o
 	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
 
-$(OEXE_CLT) : $(patsubst %,$(ODIR)/%,$(OBJS)) $(ODIR)/write_to_gpu_client.o
+$(OEXE_CLT) : $(patsubst %,$(ODIR)/%,$(OBJS)) $(ODIR)/client.o
 	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
 
 $(ODIR)/:

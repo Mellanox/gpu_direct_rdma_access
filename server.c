@@ -47,9 +47,11 @@
 
 #include "utils.h"
 #include "gpu_mem_util.h"
-#include "rdma_write_to_gpu.h"
+#include "gpu_direct_rdma_access.h"
 
 #define MAX_SGES 512
+#define ACK_MSG "rdma_task completed"
+#define PACKAGE_TYPES 2
 
 extern int debug;
 extern int debug_fast_path;
@@ -251,7 +253,7 @@ int main(int argc, char *argv[])
         return ret_val;
     }
 
-    rdma_dev = rdma_open_device_source(&usr_par.hostaddr); /* server */
+    rdma_dev = rdma_open_device_server(&usr_par.hostaddr);
     if (!rdma_dev) {
         ret_val = 1;
         return ret_val;
@@ -264,6 +266,7 @@ int main(int argc, char *argv[])
         ret_val = 1;
         goto clean_device;
     }
+
     /* RDMA buffer registration */
     struct rdma_buffer *rdma_buff;
 
@@ -296,30 +299,56 @@ sock_listen:
      */
     for (cnt = 0; cnt < usr_par.iters && keep_running; cnt++) {
 
-        int     r_size;
-        char    desc_str[sizeof "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10"];
-        char    ackmsg[sizeof "rdma_write completed"];
-        struct rdma_write_attr  write_attr;
-        int     i;
+        int                            r_size;
+        char                           desc_str[sizeof "0102030405060708:01020304:01020304:0102:010203:1:0102030405060708090a0b0c0d0e0f10"];
+        char                           ackmsg[sizeof ACK_MSG];
+        struct rdma_task_attr          task_attr;
+        int                            i;
+        uint32_t                       flags; /* Use enum rdma_task_attr_flags */
+        // payload attrs
+        uint8_t                        pl_type;
+        uint16_t                       pl_size; 
         //int     expected_comp_events = usr_par.num_sges? (usr_par.num_sges+MAX_SEND_SGE-1)/MAX_SEND_SGE: 1;
-
-        /* Receiving RDMA data (address, size, rkey etc.) from socket as a triger to start RDMA write operation */
-        DEBUG_LOG_FAST_PATH("Iteration %d: Waiting to Receive message of size %lu\n", cnt, sizeof desc_str);
-        r_size = recv(sockfd, desc_str, sizeof desc_str, MSG_WAITALL);
-        if (r_size != sizeof desc_str) {
-            fprintf(stderr, "FAILURE: Couldn't receive RDMA data for iteration %d (errno=%d '%m')\n", cnt, errno);
-            ret_val = 1;
-            goto clean_socket;
+       
+        for (i = 0; i < PACKAGE_TYPES; i++) {
+            r_size = recv(sockfd, &pl_type, sizeof(pl_type), MSG_WAITALL);
+            r_size = recv(sockfd, &pl_size, sizeof(pl_size), MSG_WAITALL);
+            switch (pl_type) {
+                case 0: // RDMA_BUF_DESC
+                    /* Receiving RDMA data (address, size, rkey etc.) from socket as a triger to start RDMA Read/Write operation */
+                    DEBUG_LOG_FAST_PATH("Iteration %d: Waiting to Receive message of size %lu\n", cnt, sizeof desc_str);   
+                    r_size = recv(sockfd, desc_str, pl_size * sizeof(char), MSG_WAITALL);
+                    if (r_size != sizeof desc_str) {
+                        fprintf(stderr, "FAILURE: Couldn't receive RDMA data for iteration %d (errno=%d '%m')\n", cnt, errno);
+                        ret_val = 1;
+                        goto clean_socket;
+                    }
+                    break;
+                case 1: // TASK_ATTRS
+                    /* Receiving rw attr flags */;
+                    int s = pl_size * sizeof(char);
+                    char t[16];
+                    r_size = recv(sockfd, &t, s, MSG_WAITALL);
+                    if (r_size != s) {
+                        fprintf(stderr, "FAILURE: Couldn't receive RDMA data for iteration %d (errno=%d '%m')\n", cnt, errno);
+                        ret_val = 1;
+                        goto clean_socket;
+                    }
+                    sscanf(t, "%08x", &flags);
+                    break;
+            }
         }
+        
         DEBUG_LOG_FAST_PATH("Received message \"%s\"\n", desc_str);
-        memset(&write_attr, 0, sizeof write_attr);
-        write_attr.remote_buf_desc_str      = desc_str;
-        write_attr.remote_buf_desc_length   = sizeof desc_str;
-        write_attr.local_buf_rdma           = rdma_buff;
-        write_attr.wr_id                    = cnt;// * expected_comp_events;
+        memset(&task_attr, 0, sizeof task_attr);
+        task_attr.remote_buf_desc_str      = desc_str;
+        task_attr.remote_buf_desc_length   = sizeof desc_str;
+        task_attr.local_buf_rdma           = rdma_buff;
+        task_attr.flags                    = flags;
+        task_attr.wr_id                    = cnt;// * expected_comp_events;
 
-        /* Executing RDMA write */
-        SDEBUG_LOG_FAST_PATH ((char*)buff, "Write iteration N %d", cnt);
+        /* Executing RDMA read */
+        SDEBUG_LOG_FAST_PATH ((char*)buff, "Read iteration N %d", cnt);
         /* Prepare send sg_list */
         if (usr_par.num_sges) {
             if (usr_par.num_sges > MAX_SGES) {
@@ -327,9 +356,9 @@ sock_listen:
                 ret_val = 1;
                 goto clean_socket;
             }
-	    memset(buf_iovec, 0, sizeof buf_iovec);
-            write_attr.local_buf_iovcnt = usr_par.num_sges;
-            write_attr.local_buf_iovec  = buf_iovec;
+	        memset(buf_iovec, 0, sizeof buf_iovec);
+            task_attr.local_buf_iovcnt = usr_par.num_sges;
+            task_attr.local_buf_iovec  = buf_iovec;
 
             size_t  portion_size;
             portion_size = (usr_par.size / usr_par.num_sges) & 0xFFFFFFC0; /* 64 byte aligned */
@@ -338,7 +367,7 @@ sock_listen:
                 buf_iovec[i].iov_len  = portion_size;
             }
         }
-        ret_val = rdma_write_to_peer(&write_attr);
+        ret_val = rdma_submit_task(&task_attr);
         if (ret_val) {
             goto clean_socket;
         }
@@ -363,9 +392,9 @@ sock_listen:
             }
         }
 
-        // Sending ack-message to the client, confirming that RDMA write has been completet
-        if (write(sockfd, "rdma_write completed", sizeof("rdma_write completed")) != sizeof("rdma_write completed")) {
-            fprintf(stderr, "FAILURE: Couldn't send \"rdma_write completed\" msg (errno=%d '%m')\n", errno);
+        // Sending ack-message to the client, confirming that RDMA read/write has been completet
+        if (write(sockfd, ACK_MSG, sizeof(ACK_MSG)) != sizeof(ACK_MSG)) {
+            fprintf(stderr, "FAILURE: Couldn't send \"%c\" msg (errno=%d '%m')\n", ACK_MSG, errno);
             ret_val = 1;
             goto clean_socket;
         }

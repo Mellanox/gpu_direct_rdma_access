@@ -46,7 +46,7 @@
 
 #include "utils.h"
 #include "gpu_mem_util.h"
-#include "rdma_write_to_gpu.h"
+#include "gpu_direct_rdma_access.h"
 
 extern int debug;
 extern int debug_fast_path;
@@ -56,15 +56,18 @@ extern int debug_fast_path;
 #define FDEBUG_LOG if (debug) fprintf
 #define FDEBUG_LOG_FAST_PATH if (debug_fast_path) fprintf
 
+#define ACK_MSG "rdma_task completed"
+
 struct user_params {
 
-    int                 port;
-    unsigned long       size;
-    int                 iters;
-    int                 use_cuda;
-    char               *bdf;
-    char               *servername;
-    struct sockaddr     hostaddr;
+    uint32_t  		    task;
+    int                     port;
+    unsigned long           size;
+    int                     iters;
+    int                     use_cuda;
+    char                   *bdf;
+    char                   *servername;
+    struct sockaddr         hostaddr;
 };
 
 /****************************************************************************************
@@ -117,12 +120,79 @@ static int open_client_socket(const char *servername,
     return sockfd;
 }
 
+enum payload_t { RDMA_BUF_DESC, TASK_ATTRS };
+
+struct payload_attr {
+	enum payload_t data_t;
+	char *payload_str;
+};
+
+/************************************************************************************
+ * Simple package protocol which packs payload string into allocated memory.
+ * Protocol consist of:
+ * 		uint8_t payload_t - type of the payload data
+ *  	uint16_t payload_size - strlen of the payload_str
+ *  	char * payload_str - payload to pack
+ * 
+ * returns: an integer equal to the size of the copied into package data in bytes
+ * _________________________________________________________________________________
+ * 
+ *            PACKAGE = {|type|size|---------payload----------|}                             
+ *                         1b   2b    (size * sizeof(char))b 
+ * 
+ ***********************************************************************************/
+int pack_payload_data(void *package, size_t package_size, struct payload_attr *attr)
+{
+    uint8_t data_t = attr->data_t;
+    uint16_t payload_size = strlen(attr->payload_str) + 1;
+    size_t req_size = sizeof(data_t) + sizeof(payload_size) + payload_size * sizeof(char) ;
+    if (req_size > package_size) {
+        fprintf(stderr, "package size (%lu) is less than required (%lu) for sending payload with attributes\n",
+                package_size, req_size);
+        return 0;
+    }
+    memcpy(package, &data_t, sizeof(data_t));
+    memcpy(package + sizeof(data_t), &payload_size, sizeof(payload_size));
+    memcpy(package + sizeof(data_t) + sizeof(payload_size), attr->payload_str, payload_size * sizeof(char));
+
+    return req_size;
+}
+
+//====================================================================================
+/*                                           t*/
+#define RDMA_TASK_ATTR_DESC_STRING_LENGTH (sizeof "12345678")
+/*************************************************************************************
+ * Get a rdma_task_attr_flags description string representation
+ *
+ * The Client application should pass this description string to the
+ * Server which will issue the RDMA Read/Write operation
+ *
+ * desc_str is input and output holding the rdma_task_attr_flags information
+ * desc_length is input size in bytes of desc_str
+ *
+ * returns: an integer equal to the size of the char data copied into desc_str
+ ************************************************************************************/
+int rdma_task_attr_flags_get_desc_str(uint32_t flags, char *desc_str, size_t desc_length)
+{
+    if (desc_length < RDMA_TASK_ATTR_DESC_STRING_LENGTH) {
+        fprintf(stderr, "desc string size (%lu) is less than required (%lu) for sending rdma_task_attr_flags data\n",
+                desc_length, RDMA_TASK_ATTR_DESC_STRING_LENGTH);
+        return 0;
+    }
+   
+    sprintf(desc_str, "%08x", flags);
+    
+    return strlen(desc_str) + 1; /*including the terminating null character*/
+}
+
 static void usage(const char *argv0)
 {
     printf("Usage:\n");
     printf("  %s <host>     connect to server at <host>\n", argv0);
     printf("\n");
     printf("Options:\n");
+    printf("  -t, --task_flags=<flags>  rdma task attrs bitmask: bit 0 - rdma operation type: 0 - \"WRITE\"(default),\n"
+           "                                                                                  1 - \"READ\"\n");
     printf("  -a, --addr=<ipaddr>       ip address of the local host net device <ipaddr v4> (mandatory)\n");
     printf("  -p, --port=<port>         listen on/connect to port <port> (default 18515)\n");
     printf("  -s, --size=<size>         size of message to exchange (default 4096)\n");
@@ -140,11 +210,13 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
     usr_par->port       = 18515;
     usr_par->size       = 4096;
     usr_par->iters      = 1000;
+    usr_par->task       = 0;
 
     while (1) {
         int c;
 
         static struct option long_options[] = {
+            { .name = "task-flags",    .has_arg = 1, .val = 't' },
             { .name = "addr",          .has_arg = 1, .val = 'a' },
             { .name = "port",          .has_arg = 1, .val = 'p' },
             { .name = "size",          .has_arg = 1, .val = 's' },
@@ -154,13 +226,17 @@ static int parse_command_line(int argc, char *argv[], struct user_params *usr_pa
             { 0 }
         };
 
-        c = getopt_long(argc, argv, "a:p:s:n:u:D:",
+        c = getopt_long(argc, argv, "t:a:p:s:n:u:D:",
                         long_options, NULL);
         if (c == -1)
             break;
 
         switch (c) {
         
+        case 't':
+            usr_par->task = (strtol(optarg, NULL, 0) >> 0) & 1; /*bit 0*/
+            break;
+
         case 'a':
             get_addr(optarg, (struct sockaddr *) &usr_par->hostaddr);
             break;
@@ -259,7 +335,8 @@ int main(int argc, char *argv[])
     }
 
     printf("Opening rdma device\n");
-    rdma_dev = rdma_open_device_target(&usr_par.hostaddr); /* client */
+    rdma_dev = rdma_open_device_client(&usr_par.hostaddr);
+
     if (!rdma_dev) {
         ret_val = 1;
         goto clean_socket;
@@ -272,7 +349,7 @@ int main(int argc, char *argv[])
         ret_val = 1;
         goto clean_device;
     }
-    
+
     /* We don't need bdf any more, sio we can free this. */
     if (usr_par.bdf) {
         free(usr_par.bdf);
@@ -288,18 +365,43 @@ int main(int argc, char *argv[])
         goto clean_mem_buff;
     }
 
-    char desc_str[256];
-    int  ret_desc_str_size = rdma_buffer_get_desc_str(rdma_buff, desc_str, sizeof desc_str);
-    if (!ret_desc_str_size) {
+    char desc_str[256], task_opt_str[16];
+
+    int ret_desc_str_size = rdma_buffer_get_desc_str(rdma_buff, desc_str, sizeof(desc_str));
+    int ret_task_opt_str_size = rdma_task_attr_flags_get_desc_str(usr_par.task, task_opt_str, sizeof(task_opt_str));
+     
+    if (!ret_desc_str_size || !ret_task_opt_str_size) {
         ret_val = 1;
         goto clean_rdma_buff;
     }
+
+    /* Package memory allocation */
+    const int package_size = (ret_desc_str_size + ret_task_opt_str_size) * sizeof(char) + 2 * sizeof(uint16_t) + 2 * sizeof(uint8_t);
+    void *package = malloc(package_size);
+    memset(package, 0, package_size);
+
+    /* Packing RDMA buff desc str */
+    struct payload_attr pl_attr = { .data_t = RDMA_BUF_DESC, .payload_str = desc_str };
+    int buff_package_size = pack_payload_data(package, package_size, &pl_attr);
+    if (!buff_package_size) {
+        ret_val = 1;
+        goto clean_package_data;
+    }
     
-    printf("Starting data requests (%d iters)\n", usr_par.iters);
+    /* Packing RDMA task attrs desc str */
+    pl_attr.data_t = TASK_ATTRS;
+    pl_attr.payload_str = task_opt_str;
+    buff_package_size += pack_payload_data(package + buff_package_size, package_size, &pl_attr);
+     if (!buff_package_size) {
+        ret_val = 1;
+        goto clean_package_data;
+    }
+    
+    printf("Starting data transfer (%d iters)\n", usr_par.iters);
     if (gettimeofday(&start, NULL)) {
         fprintf(stderr, "FAILURE: gettimeofday (errno=%d '%m')", errno);
         ret_val = 1;
-        goto clean_rdma_buff;
+        goto clean_package_data;
     }
 
     /****************************************************************************************************
@@ -307,24 +409,24 @@ int main(int argc, char *argv[])
      */
     for (cnt = 0; cnt < usr_par.iters; cnt++) {
 
-        char ackmsg[sizeof "rdma_write completed"];
+        char ackmsg[sizeof ACK_MSG];
         int  ret_size;
         
-        // Sending RDMA data (address and rkey) by socket as a triger to start RDMA write operation
-        DEBUG_LOG_FAST_PATH("Send message N %d: buffer desc \"%s\" of size %d\n", cnt, desc_str, ret_desc_str_size);
-        ret_size = write(sockfd, desc_str, ret_desc_str_size);
-        if (ret_size != ret_desc_str_size) {
+        // Sending RDMA data (address and rkey) by socket as a triger to start RDMA read/write operation
+        DEBUG_LOG_FAST_PATH("Send message N %d: buffer desc \"%s\" of size %d with task opt \"%s\" of size %d\n", cnt, desc_str, strlen(desc_str), task_opt_str, strlen(task_opt_str));
+        ret_size = write(sockfd, package, buff_package_size);
+        if (ret_size != buff_package_size) {
             fprintf(stderr, "FAILURE: Couldn't send RDMA data for iteration, write data size %d (errno=%d '%m')\n", ret_size, errno);
             ret_val = 1;
-            goto clean_rdma_buff;
+            goto clean_package_data;
         }
         
-        // Wating for confirmation message from the socket that rdma_write from the server has beed completed
+        // Wating for confirmation message from the socket that rdma_read/write from the server has beed completed
         ret_size = recv(sockfd, ackmsg, sizeof ackmsg, MSG_WAITALL);
         if (ret_size != sizeof ackmsg) {
-            fprintf(stderr, "FAILURE: Couldn't read \"rdma_write completed\" message, recv data size %d (errno=%d '%m')\n", ret_size, errno);
+            fprintf(stderr, "FAILURE: Couldn't read \"%s\" message, recv data size %d (errno=%d '%m')\n", ACK_MSG, ret_size, errno);
             ret_val = 1;
-            goto clean_rdma_buff;
+            goto clean_package_data;
         }
 
         // Printing received data for debug purpose
@@ -337,8 +439,11 @@ int main(int argc, char *argv[])
 
     ret_val = print_run_time(start, usr_par.size, usr_par.iters);
     if (ret_val) {
-        goto clean_rdma_buff;
+        goto clean_package_data;
     }
+
+clean_package_data:
+    free(package);
 
 clean_rdma_buff:
     rdma_buffer_dereg(rdma_buff);
@@ -359,5 +464,3 @@ clean_usr_par:
 
     return ret_val;
 }
-
-

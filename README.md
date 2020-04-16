@@ -1,5 +1,5 @@
-# GPU Direct RDMA Write example code
-This package shows how to use the Mellanox DC QP to implement RDMA Write operatinos directly to a remote GPU memory. It assumes the client appliation will run on a GPU enabled machine, like the NVIDIA DGX2. The server application, acting as a file storage simulation, will be running on few other Linux machines. All machine should have Mellanox ConnectX-5 NIC (or newer) in order for the DC QP to work properlly.
+# GPU Direct RDMA Access example code
+This package shows how to use the Mellanox DC QP to implement RDMA Read and Write operatinos directly to a remote GPU memory. It assumes the client appliation will run on a GPU enabled machine, like the NVIDIA DGX2. The server application, acting as a file storage simulation, will be running on few other Linux machines. All machine should have Mellanox ConnectX-5 NIC (or newer) in order for the DC QP to work properlly.
 
 In the test codem the client application allocates memory on the defined GPU (flag '-u ) or on system RAM (default). Then sends a TCP request to the server application for a RDMA Write to the client's allocated buffer. Once the server application completes the RDMA Write operation it sends back a TCP 'done' message to the client. The client can loop for multiple such requests (flag '-n'). The RDMA message size can be configured (flag '-s' bytes)
 
@@ -7,12 +7,12 @@ For optimzed data transfer, the client requiers the GPU device selection based o
 
 ## Content:
 
-rdma_write_to_gpu.h, rdma_write_to_gpu.c - RDMA_Write from Server to GPU memory by request from the Client.
+gpu_direct_rdma_access.h, gpu_direct_rdma_access.c - Handles RDMA Read and Write ops from Server to GPU memory by request from the Client.
 The API-s use DC type QPs connection for RDMA operations. The request to the server comes by socket.
 
 gpu_mem_util.h, gpu_mem_util.c - GPU/CPU memory allocation
 
-write_to_gpu_server.c, write_to_gpu_client.c - client and server main programs implementing Write to GPU.
+server.c, client.c - client and server main programs implementing GPU's Read/Write.
 
 map_pci_nic_gpu.sh, arp_announce_conf.sh - help scripts
 
@@ -53,8 +53,8 @@ $ ./write_to_gpu/arp_announce_conf.sh
 ## Build Example Code:
 
 ```sh
-$ git clone https://github.com/michaelbe2/write_to_gpu.git
-$ cd write_to_gpu
+$ git clone git@github.com:Mellanox/gpu_direct_rdma_access.git
+$ cd gpu_direct_rdma_access
 ```
 On the client machines
 ```sh
@@ -67,7 +67,7 @@ $ make
 
 ## Run Server:
 ```sh
-$ ./write_to_gpu_server -a 172.172.1.34 -n 10000 -D 1 -s 10000000 -p 18001 &
+$ ./server -a 172.172.1.34 -n 10000 -D 1 -s 10000000 -p 18001 &
 ```
 
 ## Run Client:
@@ -85,6 +85,6 @@ $ ./map_pci_nic_gpu.sh
 
 Run client application with matching IP address and BDF from the script output (-a and -u parameters)
 ```sh
-$ ./write_to_gpu_client -a 172.172.1.112 172.172.1.34 -u b7:00.0 -n 10000 -D 0 -s 10000000 -p 18001 &
+$ ./client -t 0 -a 172.172.1.112 172.172.1.34 -u b7:00.0 -n 10000 -D 0 -s 10000000 -p 18001 &
 <output>
 ```
