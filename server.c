@@ -388,6 +388,7 @@ sock_listen:
                         ibv_wc_status_str(rdma_comp_ev[i].status),
                         rdma_comp_ev[i].status, (int) rdma_comp_ev[i].wr_id);
                 ret_val = 1;
+                rdma_reset_device(rdma_dev);
                 goto clean_socket;
             }
         }

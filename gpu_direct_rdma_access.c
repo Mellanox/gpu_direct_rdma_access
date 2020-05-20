@@ -448,6 +448,50 @@ static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev)
     return 0;
 }
 
+static int close_qp(struct ibv_qp *qp) 
+{
+    int ret;
+    if (qp) {
+        DEBUG_LOG("ibv_destroy_qp(%p)\n", qp);
+        ret = ibv_destroy_qp(qp);
+    }
+    return ret;
+}
+
+static int setup_server_qp_state(struct rdma_device *rdma_dev) 
+{
+    int ret_val;
+    /* - - - - - - - - - -  Modify QP to INIT  - - - - - - - - - - - - - */
+    struct ibv_qp_attr qp_attr = {
+        .qp_state        = IBV_QPS_INIT,
+        .pkey_index      = 0,
+        .port_num        = rdma_dev->ib_port,
+        .qp_access_flags = IBV_ACCESS_LOCAL_WRITE
+    };
+    enum ibv_qp_attr_mask attr_mask = IBV_QP_STATE      |
+                                      IBV_QP_PKEY_INDEX |
+                                      IBV_QP_PORT       |
+                                      0 /*IBV_QP_ACCESS_FLAGS*/; /*we must zero this bit for DCI QP*/
+    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+               rdma_dev->qp, qp_attr.qp_state, attr_mask);
+    ret_val = ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask);
+    if (ret_val) {
+        fprintf(stderr, "Failed to modify QP to INIT, error %d\n", ret_val);
+        return 1;
+    }
+    DEBUG_LOG("ibv_modify_qp to state %d completed: qp_num = 0x%lx\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
+    
+    /* - - - - - - - - - - - - -  Modify QP to RTS  - - - - - - - - - - - - */
+    ret_val = modify_source_qp_to_rtr_and_rts(rdma_dev);
+    if (ret_val) {
+        return 1;
+    }
+
+    rdma_dev->qpex->wr_flags = IBV_SEND_SIGNALED;
+
+    return 0;
+}
+
 //============================================================================================
 struct rdma_device *rdma_open_device_client(struct sockaddr *addr)
 {
@@ -606,9 +650,7 @@ struct rdma_device *rdma_open_device_client(struct sockaddr *addr)
     return rdma_dev;
 
 clean_qp:
-    if (rdma_dev->qp) {
-        ibv_destroy_qp(rdma_dev->qp);
-    }
+    close_qp(rdma_dev->qp);
 
 clean_srq:
     if (rdma_dev->srq) {
@@ -753,33 +795,10 @@ struct rdma_device *rdma_open_device_server(struct sockaddr *addr)
         fprintf(stderr, "Couldn't create MQPEX\n");
         goto clean_qp;
     }
-
-    /* - - - - - - -  Modify QP to INIT  - - - - - - - */
-    struct ibv_qp_attr qp_attr = {
-        .qp_state        = IBV_QPS_INIT,
-        .pkey_index      = 0,
-        .port_num        = rdma_dev->ib_port,
-        .qp_access_flags = IBV_ACCESS_LOCAL_WRITE
-    };
-    enum ibv_qp_attr_mask attr_mask = IBV_QP_STATE      |
-                                      IBV_QP_PKEY_INDEX |
-                                      IBV_QP_PORT       |
-                                      0 /*IBV_QP_ACCESS_FLAGS*/; /*we must zero this bit for DCI QP*/
-    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
-               rdma_dev->qp, qp_attr.qp_state, attr_mask);
-    ret_val = ibv_modify_qp(rdma_dev->qp, &qp_attr, attr_mask);
-    if (ret_val) {
-        fprintf(stderr, "Failed to modify QP to INIT, error %d\n", ret_val);
-        goto clean_qp;
-    }
-    DEBUG_LOG("ibv_modify_qp to state %d completed: qp_num = 0x%lx\n", qp_attr.qp_state, rdma_dev->qp->qp_num);
-
-    ret_val = modify_source_qp_to_rtr_and_rts(rdma_dev);
+    ret_val = setup_server_qp_state(rdma_dev);
     if (ret_val) {
         goto clean_qp;
     }
-
-    rdma_dev->qpex->wr_flags = IBV_SEND_SIGNALED;
 
     DEBUG_LOG("init AH cache\n");
     kh_init_inplace(kh_ib_ah, &rdma_dev->ah_hash);
@@ -811,9 +830,7 @@ struct rdma_device *rdma_open_device_server(struct sockaddr *addr)
     return rdma_dev;
 
 clean_qp:
-    if (rdma_dev->qp) {
-        ibv_destroy_qp(rdma_dev->qp);
-    }
+    close_qp(rdma_dev->qp);
 
 clean_cq:
     if (rdma_dev->cq) {
@@ -836,6 +853,26 @@ clean_rdma_dev:
     free(rdma_dev);
     
     return NULL;
+}
+
+int rdma_reset_device(struct rdma_device *device)
+{
+    struct ibv_qp_attr      qp_attr;
+    enum ibv_qp_attr_mask   attr_mask;
+    memset(&qp_attr, 0, sizeof qp_attr);
+    /* - - - - - - - Modify QP to RESET - - - - - - - */
+    qp_attr.qp_state = IBV_QPS_RESET;
+    attr_mask = IBV_QP_STATE;
+    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+                    device->qp, qp_attr.qp_state, attr_mask);
+    if (ibv_modify_qp(device->qp, &qp_attr, attr_mask)) {
+        fprintf(stderr, "Failed to modify QP to RESET\n");
+        return 1;
+    }
+    DEBUG_LOG ("ibv_modify_qp to state %d completed.\n", qp_attr.qp_state, device->qp->qp_num);
+    
+    /* - - - - - - - Modify QP to RTS (RESET->INIT->RTR->RTS) - - - - - - - */
+    return setup_server_qp_state(device);
 }
 
 //============================================================================================
@@ -870,8 +907,7 @@ void rdma_close_device(struct rdma_device *rdma_dev)
         fflush(stdout);
     }
 #endif /*PRINT_LATENCY*/
-    DEBUG_LOG("ibv_destroy_qp(%p)\n", rdma_dev->qp);
-    ret_val = ibv_destroy_qp(rdma_dev->qp);
+    ret_val = close_qp(rdma_dev->qp);
     if (ret_val) {
         fprintf(stderr, "Couldn't destroy QP: error %d\n", ret_val);
         return;

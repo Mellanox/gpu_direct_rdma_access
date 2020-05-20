@@ -76,6 +76,11 @@ struct rdma_device *rdma_open_device_client(struct sockaddr *addr);
 struct rdma_device *rdma_open_device_server(struct sockaddr *addr);
 
 /*
+ * Reset device state
+ */
+int rdma_reset_device(struct rdma_device *device);
+
+/*
  * Close and release all rdma_device resources
  */
 void rdma_close_device(struct rdma_device *device);
