@@ -857,6 +857,10 @@ clean_rdma_dev:
 
 int rdma_reset_device(struct rdma_device *device)
 {
+    if (device->srq != NULL || !device->qpex || !device->mqpex) {
+        fprintf(stderr, "Method \"rdma_reset_device()\" could be executed only by server side!\n");
+        return 1;
+    }
     struct ibv_qp_attr      qp_attr;
     enum ibv_qp_attr_mask   attr_mask;
     memset(&qp_attr, 0, sizeof qp_attr);
