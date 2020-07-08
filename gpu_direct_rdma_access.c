@@ -146,6 +146,11 @@ struct rdma_buffer {
     struct rdma_device *rdma_dev;
 };
 
+static inline
+int is_server(struct rdma_device *device)
+{
+	return device->srq != NULL;
+}
 
 /* use both gid + lid data for key generarion (lid - ib based, gid - RoCE) */
 static inline
@@ -448,17 +453,17 @@ static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev)
     return 0;
 }
 
-static int close_qp(struct ibv_qp *qp) 
+static int destroy_qp(struct ibv_qp *qp) 
 {
     int ret;
     if (qp) {
-        DEBUG_LOG("ibv_destroy_qp(%p)\n", qp);
-        ret = ibv_destroy_qp(qp);
+	ret = ibv_destroy_qp(qp);
+        DEBUG_LOG("ibv_destroy_qp(%p): %d\n", qp, ret);
     }
     return ret;
 }
 
-static int setup_server_qp_state(struct rdma_device *rdma_dev) 
+static int modify_source_qp_rst2rts(struct rdma_device *rdma_dev) 
 {
     int ret_val;
     /* - - - - - - - - - -  Modify QP to INIT  - - - - - - - - - - - - - */
@@ -650,7 +655,7 @@ struct rdma_device *rdma_open_device_client(struct sockaddr *addr)
     return rdma_dev;
 
 clean_qp:
-    close_qp(rdma_dev->qp);
+    destroy_qp(rdma_dev->qp);
 
 clean_srq:
     if (rdma_dev->srq) {
@@ -795,7 +800,7 @@ struct rdma_device *rdma_open_device_server(struct sockaddr *addr)
         fprintf(stderr, "Couldn't create MQPEX\n");
         goto clean_qp;
     }
-    ret_val = setup_server_qp_state(rdma_dev);
+    ret_val = modify_source_qp_rst2rts(rdma_dev);
     if (ret_val) {
         goto clean_qp;
     }
@@ -830,7 +835,7 @@ struct rdma_device *rdma_open_device_server(struct sockaddr *addr)
     return rdma_dev;
 
 clean_qp:
-    close_qp(rdma_dev->qp);
+    destroy_qp(rdma_dev->qp);
 
 clean_cq:
     if (rdma_dev->cq) {
@@ -857,9 +862,9 @@ clean_rdma_dev:
 
 int rdma_reset_device(struct rdma_device *device)
 {
-    if (device->srq != NULL || !device->qpex || !device->mqpex) {
+    if (is_server(device)) {
         fprintf(stderr, "Method \"rdma_reset_device()\" could be executed only by server side!\n");
-        return 1;
+        return EOPNOTSUPP;
     }
     struct ibv_qp_attr      qp_attr;
     enum ibv_qp_attr_mask   attr_mask;
@@ -876,7 +881,7 @@ int rdma_reset_device(struct rdma_device *device)
     DEBUG_LOG ("ibv_modify_qp to state %d completed.\n", qp_attr.qp_state, device->qp->qp_num);
     
     /* - - - - - - - Modify QP to RTS (RESET->INIT->RTR->RTS) - - - - - - - */
-    return setup_server_qp_state(device);
+    return modify_source_qp_rst2rts(device);
 }
 
 //============================================================================================
@@ -911,7 +916,7 @@ void rdma_close_device(struct rdma_device *rdma_dev)
         fflush(stdout);
     }
 #endif /*PRINT_LATENCY*/
-    ret_val = close_qp(rdma_dev->qp);
+    ret_val = destroy_qp(rdma_dev->qp);
     if (ret_val) {
         fprintf(stderr, "Couldn't destroy QP: error %d\n", ret_val);
         return;
