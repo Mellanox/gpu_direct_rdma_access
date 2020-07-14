@@ -455,12 +455,15 @@ static int modify_source_qp_to_rtr_and_rts(struct rdma_device *rdma_dev)
 
 static int destroy_qp(struct ibv_qp *qp) 
 {
-    int ret;
-    if (qp) {
-	ret = ibv_destroy_qp(qp);
-        DEBUG_LOG("ibv_destroy_qp(%p): %d\n", qp, ret);
-    }
-    return ret;
+	int ret;
+	if (qp) {
+		DEBUG_LOG("ibv_destroy_qp(%p)\n", qp);
+		ret = ibv_destroy_qp(qp);
+		if (ret) {
+			fprintf(stderr, "Couldn't destroy QP: error %d\n", ret);  
+		}
+	}
+	return ret;
 }
 
 static int modify_source_qp_rst2rts(struct rdma_device *rdma_dev) 
@@ -918,7 +921,6 @@ void rdma_close_device(struct rdma_device *rdma_dev)
 #endif /*PRINT_LATENCY*/
     ret_val = destroy_qp(rdma_dev->qp);
     if (ret_val) {
-        fprintf(stderr, "Couldn't destroy QP: error %d\n", ret_val);
         return;
     }
 
