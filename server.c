@@ -371,7 +371,7 @@ sock_listen:
         if (ret_val) {
             goto clean_socket;
         }
-        
+
 	/* Completion queue polling loop */
         DEBUG_LOG_FAST_PATH("Polling completion queue\n");
         struct rdma_completion_event rdma_comp_ev[10];
