@@ -152,7 +152,7 @@ struct rdma_buffer {
 static inline
 int is_server(struct rdma_device *device)
 {
-	return device->srq != NULL;
+	return device->srq == NULL;
 }
 
 /* use both gid + lid data for key generarion (lid - ib based, gid - RoCE) */
@@ -869,7 +869,7 @@ clean_rdma_dev:
 int rdma_reset_server_device(struct rdma_task_attr *attr)
 {
 	struct rdma_device *device = attr->local_buf_rdma->rdma_dev;
-	if (is_server(device)) {
+	if (!is_server(device)) {
 		fprintf(stderr, "Method \"rdma_reset_server_device()\" could be executed only by server side!\n");
 		return EOPNOTSUPP;
 	}
