@@ -61,6 +61,21 @@ struct rdma_open_dev_attr {
     int             ib_port;
     int             gidx;
 };
+
+enum rdma_task_attr_flags {
+        RDMA_TASK_ATTR_RDMA_READ = 1 << 0,
+};
+
+struct rdma_task_attr {
+        char                    *remote_buf_desc_str;
+        size_t                   remote_buf_desc_length;
+        size_t                   remote_buf_offset;
+        struct rdma_buffer      *local_buf_rdma;
+        struct iovec            *local_buf_iovec;
+        int                      local_buf_iovcnt;
+        uint32_t                 flags; /* Use enum rdma_task_attr_flags */
+        uint64_t                 wr_id;
+};
 /*
  * Open a RDMA device and allocated requiered resources.
  * find the capable RDMA device based on the 'addr' as an ip address
@@ -103,21 +118,6 @@ void rdma_buffer_dereg(struct rdma_buffer *buffer);
  * returns: an integer equal to the size of the char data copied into desc_str
  */
 int rdma_buffer_get_desc_str(struct rdma_buffer *rdma_buff, char *desc_str, size_t desc_length);
-
-enum rdma_task_attr_flags {
-	RDMA_TASK_ATTR_RDMA_READ = 1 << 0
-};
-
-struct rdma_task_attr {
-	char			*remote_buf_desc_str;
-	size_t			 remote_buf_desc_length;
-	size_t			 remote_buf_offset;
-	struct rdma_buffer	*local_buf_rdma;
-	struct iovec 		*local_buf_iovec;
-	int            		 local_buf_iovcnt;
-	uint32_t		 flags; /* Use enum rdma_task_attr_flags */
-	uint64_t       		 wr_id;
-};
 
 /*
  * Issue a RDMA WRITE operation from a local buffer to a remote buffer, 
