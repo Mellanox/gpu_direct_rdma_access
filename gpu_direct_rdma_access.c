@@ -69,7 +69,7 @@ int debug_fast_path = 0;
 #define COMP_ARRAY_SIZE 16
 #define TC_PRIO         3
 
-#define ZERO_BYTE_MSG_WR_ID UINT64_MAX  
+#define WR_ID_FLUSH_MARKER UINT64_MAX  
 
 #define mmin(a, b)      a < b ? a : b
 
@@ -889,7 +889,7 @@ int rdma_reset_server_device(struct rdma_task_attr *attr)
 	
 	/* - - - - - - - FLUSH WORK COMPLETIONS - - - - - - - */
 	attr->flags |= RDMA_TASK_ATTR_ZERO_BYTE_MSG;
-	attr->wr_id = ZERO_BYTE_MSG_WR_ID;
+	attr->wr_id = WR_ID_FLUSH_MARKER;
 	rdma_submit_task(attr);
 
 	DEBUG_LOG_FAST_PATH("Polling ZERO_BYTE_MSG completion\n");
@@ -899,7 +899,7 @@ int rdma_reset_server_device(struct rdma_task_attr *attr)
 		int i, reported_ev;
 		reported_ev = rdma_poll_completions(device, &rdma_comp_ev[reported_ev], 16);
 		for (i = 0; !flushed && i < reported_ev; i++) {
-			flushed = rdma_comp_ev[i].wr_id == ZERO_BYTE_MSG_WR_ID;
+			flushed = rdma_comp_ev[i].wr_id == WR_ID_FLUSH_MARKER;
 		}
 	} while (!flushed);
 	DEBUG_LOG_FAST_PATH("Finished ZERO_BYTE_MSG polling\n");
