@@ -389,7 +389,7 @@ sock_listen:
                         rdma_comp_ev[i].status, (int) rdma_comp_ev[i].wr_id);
                 ret_val = 1;
                	if (usr_par.persistent && keep_running) {
-			rdma_reset_device(rdma_dev);
+			rdma_reset_server_device(&task_attr);
                 }
 		goto clean_socket;
             }
