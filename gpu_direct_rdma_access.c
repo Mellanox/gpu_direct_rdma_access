@@ -893,11 +893,11 @@ int rdma_reset_server_device(struct rdma_task_attr *attr)
 	rdma_submit_task(attr);
 
 	DEBUG_LOG_FAST_PATH("Polling ZERO_BYTE_MSG completion\n");
-	struct rdma_completion_event rdma_comp_ev[16];
+	struct rdma_completion_event rdma_comp_ev[COMP_ARRAY_SIZE];
 	int flushed = 0;
 	do {
 		int i, reported_ev;
-		reported_ev = rdma_poll_completions(device, &rdma_comp_ev[reported_ev], 16);
+		reported_ev = rdma_poll_completions(device, &rdma_comp_ev[reported_ev], COMP_ARRAY_SIZE);
 		for (i = 0; !flushed && i < reported_ev; i++) {
 			flushed = rdma_comp_ev[i].wr_id == WR_ID_FLUSH_MARKER;
 		}
