@@ -69,13 +69,16 @@ int debug_fast_path = 0;
 #define COMP_ARRAY_SIZE 16
 #define TC_PRIO         3
 
+#define ZERO_BYTE_MSG_WR_ID UINT64_MAX  
+
 #define mmin(a, b)      a < b ? a : b
 
 KHASH_TYPE(kh_ib_ah, struct ibv_ah_attr, struct ibv_ah*);
 
 struct wr_id_reported {
-    uint64_t    wr_id;
-    uint32_t    num_wrs;
+    uint64_t 	wr_id;
+    uint16_t	num_wrs;
+    uint16_t 	active_flag;
 };
 
 #ifdef PRINT_LATENCY
@@ -863,28 +866,64 @@ clean_rdma_dev:
     return NULL;
 }
 
-int rdma_reset_device(struct rdma_device *device)
+int rdma_reset_server_device(struct rdma_task_attr *attr)
 {
-    if (is_server(device)) {
-        fprintf(stderr, "Method \"rdma_reset_device()\" could be executed only by server side!\n");
-        return EOPNOTSUPP;
-    }
-    struct ibv_qp_attr      qp_attr;
-    enum ibv_qp_attr_mask   attr_mask;
-    memset(&qp_attr, 0, sizeof qp_attr);
-    /* - - - - - - - Modify QP to RESET - - - - - - - */
-    qp_attr.qp_state = IBV_QPS_RESET;
-    attr_mask = IBV_QP_STATE;
-    DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+	struct rdma_device *device = attr->local_buf_rdma->rdma_dev;
+	if (is_server(device)) {
+		fprintf(stderr, "Method \"rdma_reset_server_device()\" could be executed only by server side!\n");
+		return EOPNOTSUPP;
+	}
+	struct ibv_qp_attr      qp_attr;
+	enum ibv_qp_attr_mask   attr_mask;
+	memset(&qp_attr, 0, sizeof qp_attr);
+	
+	/* - - - - - - - Modify QP to ERR - - - - - - - */
+	qp_attr.qp_state = IBV_QPS_ERR;
+	attr_mask = IBV_QP_STATE;
+	DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
+                      device->qp, qp_attr.qp_state, attr_mask);
+	if (ibv_modify_qp(device->qp, &qp_attr, attr_mask)) {
+		fprintf(stderr, "Failed to modify QP to ERR\n");
+		return 1;
+	}
+	
+	/* - - - - - - - FLUSH WORK COMPLETIONS - - - - - - - */
+	attr->flags |= RDMA_TASK_ATTR_ZERO_BYTE_MSG;
+	attr->wr_id = ZERO_BYTE_MSG_WR_ID;
+	rdma_submit_task(attr);
+
+	DEBUG_LOG_FAST_PATH("Polling ZERO_BYTE_MSG completion\n");
+	struct rdma_completion_event rdma_comp_ev[16];
+	int reported_ev = 0;
+	int flushed = 0;
+	do {
+		int i;
+		reported_ev = rdma_poll_completions(device, &rdma_comp_ev[reported_ev], 16);
+		for (i = 0; !flushed && i < reported_ev; i++) {
+			flushed = rdma_comp_ev[i].wr_id == ZERO_BYTE_MSG_WR_ID;
+		}
+	} while (!flushed);
+	DEBUG_LOG_FAST_PATH("Finished ZERO_BYTE_MSG polling\n");
+
+	/* - - - - - - - RESET RDMA_DEVICE MEMBERS - - - - - - - */
+	memset(device->app_wr_id, 0, sizeof(device->app_wr_id));
+	device->app_wr_id_idx = 0;
+	device->qp_available_wr = SEND_Q_DEPTH;
+	kh_clear(kh_ib_ah, &device->ah_hash);
+	
+	/* - - - - - - - Modify QP to RESET - - - - - - - */
+	qp_attr.qp_state = IBV_QPS_RESET;
+	attr_mask = IBV_QP_STATE;
+	DEBUG_LOG("ibv_modify_qp(qp = %p, qp_attr.qp_state = %d, attr_mask = 0x%x)\n",
                     device->qp, qp_attr.qp_state, attr_mask);
-    if (ibv_modify_qp(device->qp, &qp_attr, attr_mask)) {
-        fprintf(stderr, "Failed to modify QP to RESET\n");
-        return 1;
-    }
-    DEBUG_LOG ("ibv_modify_qp to state %d completed.\n", qp_attr.qp_state, device->qp->qp_num);
-    
-    /* - - - - - - - Modify QP to RTS (RESET->INIT->RTR->RTS) - - - - - - - */
-    return modify_source_qp_rst2rts(device);
+	if (ibv_modify_qp(device->qp, &qp_attr, attr_mask)) {
+		fprintf(stderr, "Failed to modify QP to RESET\n");
+		return 1;
+	}
+	DEBUG_LOG ("ibv_modify_qp to state %d completed.\n", qp_attr.qp_state, device->qp->qp_num);
+
+	/* - - - - - - - Modify QP to RTS (RESET->INIT->RTR->RTS) - - - - - - - */
+	return modify_source_qp_rst2rts(device);
 }
 
 //============================================================================================
@@ -1261,8 +1300,10 @@ int rdma_submit_task(struct rdma_task_attr *attr)
     // update internal wr_id DB
     rdma_dev->qp_available_wr -= required_wr;
     rdma_dev->app_wr_id[wr_id_idx].num_wrs = required_wr;
+    rdma_dev->app_wr_id[wr_id_idx].wr_id = attr->wr_id;
+    rdma_dev->app_wr_id[wr_id_idx].active_flag = 1;
 
-    if (attr->local_buf_iovcnt) {
+    if (attr->local_buf_iovcnt && !(attr->flags & RDMA_TASK_ATTR_ZERO_BYTE_MSG)) {
         int i, start_i = 0;
         struct ibv_sge sg_list[MAX_SEND_SGE];
         uint64_t curr_rem_addr = (uint64_t)rem_buf_addr;
@@ -1270,7 +1311,6 @@ int rdma_submit_task(struct rdma_task_attr *attr)
         int curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
 
         while (num_sges_to_send > 0) {
-            rdma_dev->app_wr_id[wr_id_idx].wr_id = attr->wr_id;
             rdma_dev->qpex->wr_id = (uint64_t)wr_id_idx;
             rdma_dev->qpex->wr_flags = num_sges_to_send > MAX_SEND_SGE ? 0 : IBV_SEND_SIGNALED;
 
@@ -1300,7 +1340,6 @@ int rdma_submit_task(struct rdma_task_attr *attr)
         }
     
     } else {
-        rdma_dev->app_wr_id[wr_id_idx].wr_id = attr->wr_id;
         rdma_dev->qpex->wr_id = (uint64_t)wr_id_idx;
         rdma_dev->qpex->wr_flags = IBV_SEND_SIGNALED;
         
@@ -1319,7 +1358,9 @@ int rdma_submit_task(struct rdma_task_attr *attr)
         DEBUG_LOG_FAST_PATH("RDMA Read/Write: ibv_wr_set_sge: qpex=%p, lkey=0x%x, local_buf=0x%llx, size=%u\n",
                             rdma_dev->qpex, attr->local_buf_rdma->mr->lkey,
                             (unsigned long long)attr->local_buf_rdma->buf_addr, (uint32_t)rem_buf_size);
-        ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, (uintptr_t)attr->local_buf_rdma->buf_addr, (uint32_t)rem_buf_size);
+        ibv_wr_set_sge(rdma_dev->qpex, attr->local_buf_rdma->mr->lkey, 
+			(uintptr_t)attr->local_buf_rdma->buf_addr, 
+			(attr->flags & RDMA_TASK_ATTR_ZERO_BYTE_MSG) ? 0 :(uint32_t)rem_buf_size);
     }
 
     /* ring DB */
@@ -1348,7 +1389,7 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
 {
     int    reported_entries = 0;
 
-    if (num_entries > COMP_ARRAY_SIZE){
+    if (num_entries > COMP_ARRAY_SIZE) {
         num_entries = COMP_ARRAY_SIZE; /* We don't returne more than 16 entries,
                         If user needs more, he can call rdma_poll_completions again */
     }
@@ -1366,17 +1407,21 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
         return reported_entries; /*0*/
     }
     
-    while (ret_val != ENOENT)
-    {
+    while (ret_val != ENOENT) {
         uint64_t cq_wr_id = rdma_dev->cq->wr_id;
         DEBUG_LOG_FAST_PATH("virtual wr_id %llu, original wr_id 0x%llx, num_wrs=%d\n",
                             (long long unsigned int)cq_wr_id,
                             (long long unsigned int)rdma_dev->app_wr_id[cq_wr_id].wr_id,
                             rdma_dev->app_wr_id[cq_wr_id].num_wrs);
-        rdma_dev->qp_available_wr += rdma_dev->app_wr_id[cq_wr_id].num_wrs;
-        event[reported_entries].wr_id  = rdma_dev->app_wr_id[cq_wr_id].wr_id;
-        event[reported_entries].status = rdma_dev->cq->status;
-        reported_entries++;
+        if (rdma_dev->app_wr_id[cq_wr_id].active_flag) {
+		if (rdma_dev->cq->status != IBV_WC_SUCCESS) {
+			rdma_dev->app_wr_id[wc[i].wr_id].active_flag = 0;
+		}
+		rdma_dev->qp_available_wr += rdma_dev->app_wr_id[cq_wr_id].num_wrs;
+        	event[reported_entries].wr_id  = rdma_dev->app_wr_id[cq_wr_id].wr_id;
+        	event[reported_entries].status = rdma_dev->cq->status;
+        	reported_entries++;
+	}
         
         rdma_dev->latency[cq_wr_id].completion_ts = ibv_wc_read_completion_ts(rdma_dev->cq);
         
@@ -1457,10 +1502,15 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
                             i, (long long unsigned int)wc[i].wr_id,
                             (long long unsigned int)rdma_dev->app_wr_id[wc[i].wr_id].wr_id,
                             rdma_dev->app_wr_id[wc[i].wr_id].num_wrs);
-        rdma_dev->qp_available_wr += rdma_dev->app_wr_id[wc[i].wr_id].num_wrs;
-        event[reported_entries].wr_id  = rdma_dev->app_wr_id[wc[i].wr_id].wr_id;
-        event[reported_entries].status = wc[i].status;
-        reported_entries++;
+        if (rdma_dev->app_wr_id[wc[i].wr_id].active_flag) {
+		if (wc[i].status != IBV_WC_SUCCESS) {
+			rdma_dev->app_wr_id[wc[i].wr_id].active_flag = 0;
+		}
+		rdma_dev->qp_available_wr += rdma_dev->app_wr_id[wc[i].wr_id].num_wrs;
+		event[reported_entries].wr_id  = rdma_dev->app_wr_id[wc[i].wr_id].wr_id;
+  		event[reported_entries].status = wc[i].status;
+		reported_entries++;
+	}
     }
 #endif /*PRINT_LATENCY*/
     return reported_entries;
