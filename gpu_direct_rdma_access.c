@@ -894,10 +894,9 @@ int rdma_reset_server_device(struct rdma_task_attr *attr)
 
 	DEBUG_LOG_FAST_PATH("Polling ZERO_BYTE_MSG completion\n");
 	struct rdma_completion_event rdma_comp_ev[16];
-	int reported_ev = 0;
 	int flushed = 0;
 	do {
-		int i;
+		int i, reported_ev;
 		reported_ev = rdma_poll_completions(device, &rdma_comp_ev[reported_ev], 16);
 		for (i = 0; !flushed && i < reported_ev; i++) {
 			flushed = rdma_comp_ev[i].wr_id == ZERO_BYTE_MSG_WR_ID;
