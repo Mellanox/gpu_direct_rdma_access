@@ -64,7 +64,6 @@ struct rdma_open_dev_attr {
 
 enum rdma_task_attr_flags {
         RDMA_TASK_ATTR_RDMA_READ = 1 << 0,
-        RDMA_TASK_ATTR_ZERO_BYTE_MSG = 1 << 1
 };
 
 struct rdma_task_attr {
@@ -94,7 +93,7 @@ struct rdma_device *rdma_open_device_server(struct sockaddr *addr);
 /*
  * Reset device from failed state back to an operations state 
  */
-int rdma_reset_server_device(struct rdma_task_attr *attr);
+int rdma_reset_server_device(struct rdma_device *device);
 
 /*
  * Close and release all rdma_device resources
