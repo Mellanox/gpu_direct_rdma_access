@@ -1006,7 +1006,7 @@ int rdma_exec_task(struct rdma_exec_params *exec_params)
 }
 //===========================================================================================
 
-int rdma_reset_server_device(struct rdma_device *device)
+int rdma_reset_device(struct rdma_device *device)
 {
 	if (!is_server(device)) {
 		fprintf(stderr, "Method \"rdma_reset_server_device()\" could be executed only by server side!\n");
