@@ -958,6 +958,11 @@ int rdma_exec_task(struct rdma_exec_params *exec_params)
 			ibv_wr_set_sge_list(exec_params->device->qpex, (size_t)curr_iovcnt, sg_list);
 			num_sges_to_send -= curr_iovcnt;
 			start_i += curr_iovcnt;
+
+
+			DEBUG_LOG_FAST_PATH("RDMA Read/Write: mlx5dv_wr_set_dc_addr: mqpex=%p, ah=%p, rem_dctn=0x%06lx\n",
+				exec_params->device->mqpex, exec_params->ah, exec_params->rem_dctn);
+			mlx5dv_wr_set_dc_addr(exec_params->device->mqpex, exec_params->ah, exec_params->rem_dctn, DC_KEY);
 		}
 	} else {
 		exec_params->device->qpex->wr_flags = IBV_SEND_SIGNALED;
@@ -972,11 +977,11 @@ int rdma_exec_task(struct rdma_exec_params *exec_params)
 				exec_params->device->qpex, exec_params->local_buf_mr_lkey,
 				(unsigned long long)exec_params->local_buf_addr, exec_params->rem_buf_size);
 		ibv_wr_set_sge(exec_params->device->qpex, exec_params->local_buf_mr_lkey, (uintptr_t)exec_params->local_buf_addr, exec_params->rem_buf_size);
-	}
 
-	DEBUG_LOG_FAST_PATH("RDMA Read/Write: mlx5dv_wr_set_dc_addr: mqpex=%p, ah=%p, rem_dctn=0x%06lx\n",
-			exec_params->device->mqpex, exec_params->ah, exec_params->rem_dctn);
-	mlx5dv_wr_set_dc_addr(exec_params->device->mqpex, exec_params->ah, exec_params->rem_dctn, DC_KEY);
+		DEBUG_LOG_FAST_PATH("RDMA Read/Write: mlx5dv_wr_set_dc_addr: mqpex=%p, ah=%p, rem_dctn=0x%06lx\n",
+				exec_params->device->mqpex, exec_params->ah, exec_params->rem_dctn);
+		mlx5dv_wr_set_dc_addr(exec_params->device->mqpex, exec_params->ah, exec_params->rem_dctn, DC_KEY);
+	}
 
 	/* ring DB */
 	DEBUG_LOG_FAST_PATH("ibv_wr_complete: qpex=%p, required_wr=%d\n", exec_params->device->qpex, required_wr);
@@ -1041,7 +1046,9 @@ int rdma_reset_server_device(struct rdma_device *device)
 	memset(device->app_wr_id, 0, sizeof(device->app_wr_id));
 	device->app_wr_id_idx = 0;
 	device->qp_available_wr = SEND_Q_DEPTH;
-	
+	kh_foreach_value(&device->ah_hash, exec_params.ah, ibv_destroy_ah(exec_params.ah));
+	kh_clear(kh_ib_ah, &device->ah_hash);
+
 	/* - - - - - - - Modify QP to RESET - - - - - - - */
 	qp_attr.qp_state = IBV_QPS_RESET;
 	attr_mask = IBV_QP_STATE;
