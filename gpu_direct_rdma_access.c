@@ -75,10 +75,14 @@ int debug_fast_path = 0;
 
 KHASH_TYPE(kh_ib_ah, struct ibv_ah_attr, struct ibv_ah*);
 
+enum wr_id_flags {
+	WR_ID_FLAGS_ACTIVE = 1 << 0
+};
+
 struct wr_id_reported {
     uint64_t 	wr_id;
     uint16_t	num_wrs;
-    uint16_t 	active_flag;
+    uint16_t	flags; /* enum wr_id_flags */
 };
 
 #ifdef PRINT_LATENCY
@@ -927,7 +931,7 @@ int rdma_exec_task(struct rdma_exec_params *exec_params)
 	exec_params->device->qp_available_wr -= required_wr;
 	exec_params->device->app_wr_id[wr_id_idx].num_wrs = required_wr;
 	exec_params->device->app_wr_id[wr_id_idx].wr_id = exec_params->wr_id;
-	exec_params->device->app_wr_id[wr_id_idx].active_flag = 1;
+	exec_params->device->app_wr_id[wr_id_idx].flags = WR_ID_FLAGS_ACTIVE;
 
 	exec_params->device->qpex->wr_id = (uint64_t)wr_id_idx;
 
@@ -1439,10 +1443,8 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
                             (long long unsigned int)cq_wr_id,
                             (long long unsigned int)rdma_dev->app_wr_id[cq_wr_id].wr_id,
                             rdma_dev->app_wr_id[cq_wr_id].num_wrs);
-        if (rdma_dev->app_wr_id[cq_wr_id].active_flag) {
-		if (rdma_dev->cq->status != IBV_WC_SUCCESS) {
-			rdma_dev->app_wr_id[wc[i].wr_id].active_flag = 0;
-		}
+        if (rdma_dev->app_wr_id[cq_wr_id].flags & WR_ID_FLAGS_ACTIVE) {
+		rdma_dev->app_wr_id[wc[i].wr_id].flags = 0;
 		rdma_dev->qp_available_wr += rdma_dev->app_wr_id[cq_wr_id].num_wrs;
         	event[reported_entries].wr_id  = rdma_dev->app_wr_id[cq_wr_id].wr_id;
         	event[reported_entries].status = rdma_dev->cq->status;
@@ -1487,24 +1489,23 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
                                             read_comp_latency: rdma_dev->max_read_comp_latency;
         
         DEBUG_LOG_FAST_PATH("PRINT_LATENCY: wr_id = %6lu, wr_sent latency: current %8lu, min %8lu, max %8lu, avg %8lu (nSec)\n",
-                            cq_wr_id,
-                            wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
-                            rdma_dev->min_wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
-                            rdma_dev->max_wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
-                            rdma_dev->wr_complete_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
+			cq_wr_id,
+			wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+			rdma_dev->min_wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+			rdma_dev->max_wr_complete_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+			rdma_dev->wr_complete_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
 
         DEBUG_LOG_FAST_PATH("PRINT_LATENCY:   completion latency           : current %8lu, min %8lu, max %8lu, avg %8lu (nSec)\n",
-                            completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
-                            rdma_dev->min_completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
-                            rdma_dev->max_completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
-                            rdma_dev->completion_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
+			completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+			rdma_dev->min_completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+			rdma_dev->max_completion_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+			rdma_dev->completion_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
         
         DEBUG_LOG_FAST_PATH("PRINT_LATENCY:   read_comp latency            : current %8lu, min %8lu, max %8lu, avg %8lu (nSec)\n",
-                            read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
-                            rdma_dev->min_read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
-                            rdma_dev->max_read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
-                            rdma_dev->read_comp_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
-
+			read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+			rdma_dev->min_read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+			rdma_dev->max_read_comp_latency * 1000000 / rdma_dev->hca_core_clock_kHz,
+			rdma_dev->read_comp_latency_sum / rdma_dev->measure_index * 1000000 / rdma_dev->hca_core_clock_kHz);
 
         ret_val = ibv_next_poll(rdma_dev->cq);
         if ((ret_val) && (ret_val != ENOENT)) {
@@ -1528,10 +1529,8 @@ int rdma_poll_completions(struct rdma_device            *rdma_dev,
                             i, (long long unsigned int)wc[i].wr_id,
                             (long long unsigned int)rdma_dev->app_wr_id[wc[i].wr_id].wr_id,
                             rdma_dev->app_wr_id[wc[i].wr_id].num_wrs);
-        if (rdma_dev->app_wr_id[wc[i].wr_id].active_flag) {
-		if (wc[i].status != IBV_WC_SUCCESS) {
-			rdma_dev->app_wr_id[wc[i].wr_id].active_flag = 0;
-		}
+        if (rdma_dev->app_wr_id[wc[i].wr_id].flags & WR_ID_FLAGS_ACTIVE) {
+		rdma_dev->app_wr_id[wc[i].wr_id].flags = 0;
 		rdma_dev->qp_available_wr += rdma_dev->app_wr_id[wc[i].wr_id].num_wrs;
 		event[reported_entries].wr_id  = rdma_dev->app_wr_id[wc[i].wr_id].wr_id;
   		event[reported_entries].status = wc[i].status;
