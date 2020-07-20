@@ -1032,9 +1032,10 @@ int rdma_reset_server_device(struct rdma_device *device)
 	exec_params.device = device;
 	khint_t	ah_itr = kh_begin(&device->ah_hash);
 	exec_params.ah = kh_value(&device->ah_hash, ah_itr);
+	DEBUG_LOG_FAST_PATH("Posting FLUSH MARKER on queue\n");
 	rdma_exec_task(&exec_params);
 
-	DEBUG_LOG_FAST_PATH("Polling ZERO_BYTE_MSG completion\n");
+	DEBUG_LOG_FAST_PATH("Flushing Work Completions\n");
 	struct rdma_completion_event rdma_comp_ev[COMP_ARRAY_SIZE];
 	int flushed = 0;
 	do {
@@ -1044,7 +1045,7 @@ int rdma_reset_server_device(struct rdma_device *device)
 			flushed = rdma_comp_ev[i].wr_id == WR_ID_FLUSH_MARKER;
 		}
 	} while (!flushed);
-	DEBUG_LOG_FAST_PATH("Finished ZERO_BYTE_MSG polling\n");
+	DEBUG_LOG_FAST_PATH("Finished Work Completions flushing\n");
 
 	/* - - - - - - - RESET RDMA_DEVICE MEMBERS - - - - - - - */
 	memset(device->app_wr_id, 0, sizeof(device->app_wr_id));
