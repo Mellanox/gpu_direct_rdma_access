@@ -356,9 +356,9 @@ sock_listen:
                 ret_val = 1;
                 goto clean_socket;
             }
-	        memset(buf_iovec, 0, sizeof buf_iovec);
-            task_attr.local_buf_iovcnt = usr_par.num_sges;
-            task_attr.local_buf_iovec  = buf_iovec;
+	    memset(buf_iovec, 0, sizeof buf_iovec);
+	    task_attr.local_buf_iovcnt = usr_par.num_sges;
+	    task_attr.local_buf_iovec  = buf_iovec;
 
             size_t  portion_size;
             portion_size = (usr_par.size / usr_par.num_sges) & 0xFFFFFFC0; /* 64 byte aligned */
@@ -371,8 +371,8 @@ sock_listen:
         if (ret_val) {
             goto clean_socket;
         }
-        
-        /* Completion queue polling loop */
+
+	/* Completion queue polling loop */
         DEBUG_LOG_FAST_PATH("Polling completion queue\n");
         struct rdma_completion_event rdma_comp_ev[10];
         int    reported_ev  = 0;
@@ -388,7 +388,10 @@ sock_listen:
                         ibv_wc_status_str(rdma_comp_ev[i].status),
                         rdma_comp_ev[i].status, (int) rdma_comp_ev[i].wr_id);
                 ret_val = 1;
-                goto clean_socket;
+               	if (usr_par.persistent && keep_running) {
+			rdma_reset_device(rdma_dev);
+                }
+		goto clean_socket;
             }
         }
 
