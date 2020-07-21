@@ -1341,7 +1341,8 @@ int rdma_submit_task(struct rdma_task_attr *attr)
 	int                     is_global = 0;
     	union ibv_gid           rem_gid;
     	int                     ret_val;
-	
+
+	exec_params.wr_id = attr->wr_id;
 	exec_params.device = attr->local_buf_rdma->rdma_dev;
 	exec_params.flags = attr->flags;
 	exec_params.local_buf_mr_lkey = (uint32_t)attr->local_buf_rdma->mr->lkey;
