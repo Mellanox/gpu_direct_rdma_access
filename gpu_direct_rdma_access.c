@@ -802,7 +802,7 @@ struct rdma_device *rdma_open_device_server(struct sockaddr *addr)
     rdma_dev->qp_available_wr = SEND_Q_DEPTH;
 
     attr_ex.comp_mask |= IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
-    attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE/* | IBV_QP_EX_WITH_RDMA_READ*/;
+    attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE | IBV_QP_EX_WITH_RDMA_READ;
 
     attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_QP_CREATE_FLAGS;
     attr_dv.create_flags |= MLX5DV_QP_CREATE_DISABLE_SCATTER_TO_CQE; /*driver doesnt support scatter2cqe data-path on DCI yet*/
@@ -940,9 +940,9 @@ int rdma_exec_task(struct rdma_exec_params *exec_params)
 		struct ibv_sge sg_list[MAX_SEND_SGE];
 	       	uint64_t curr_rem_addr = (uint64_t)exec_params->rem_buf_addr;
 		int num_sges_to_send = exec_params->local_buf_iovcnt;
-		int curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
 
 		while (num_sges_to_send > 0) {
+			int curr_iovcnt = mmin(MAX_SEND_SGE, num_sges_to_send);
 			exec_params->device->qpex->wr_flags = num_sges_to_send > MAX_SEND_SGE ? 0 : IBV_SEND_SIGNALED;
 
 			DEBUG_LOG_FAST_PATH("RDMA Read/Write: ibv_wr_rdma_%s: wr_id=0x%llx, qpex=%p, rkey=0x%lx, remote_buf=0x%llx\n",
@@ -1039,7 +1039,7 @@ int rdma_reset_device(struct rdma_device *device)
 	struct rdma_completion_event rdma_comp_ev[COMP_ARRAY_SIZE];
 	int flushed = 0;
 	do {
-		int i, reported_ev;
+		int i, reported_ev = 0;
 		reported_ev = rdma_poll_completions(device, &rdma_comp_ev[reported_ev], COMP_ARRAY_SIZE);
 		for (i = 0; !flushed && i < reported_ev; i++) {
 			flushed = rdma_comp_ev[i].wr_id == WR_ID_FLUSH_MARKER;
