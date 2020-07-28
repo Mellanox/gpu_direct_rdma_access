@@ -45,7 +45,7 @@ follow the download, build and inall guide on https://github.com/Mellanox/nv_pee
 
 Configured system arp handling for multi-homed network with RoCE traffic (on DGX2 server)
 ```sh
-$ git clone https://github.com/michaelbe2/write_to_gpu.git
+$ git clone https://github.com/Mellanox/gpu_direct_rdma_access.git
 $ ./write_to_gpu/arp_announce_conf.sh
 ```
 **5. Check RDMA connectivity between all cluster nodes**
