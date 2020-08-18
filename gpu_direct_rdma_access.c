@@ -1009,7 +1009,7 @@ int rdma_exec_task(struct rdma_exec_params *exec_params)
 int rdma_reset_device(struct rdma_device *device)
 {
 	if (!is_server(device)) {
-		fprintf(stderr, "Method \"rdma_reset_server_device()\" could be executed only by server side!\n");
+		fprintf(stderr, "Method \"rdma_reset_device()\" could be executed only by server side!\n");
 		return EOPNOTSUPP;
 	}
 	struct ibv_qp_attr      qp_attr;
@@ -1027,11 +1027,17 @@ int rdma_reset_device(struct rdma_device *device)
 	}
 	
 	/* - - - - - - - FLUSH WORK COMPLETIONS - - - - - - - */
-	struct rdma_exec_params exec_params = {};
+	struct rdma_exec_params exec_params;
+	memset(&exec_params, 0, sizeof exec_params);
 	exec_params.wr_id = WR_ID_FLUSH_MARKER;
 	exec_params.device = device;
 	khint_t	ah_itr = kh_begin(&device->ah_hash);
 	exec_params.ah = kh_value(&device->ah_hash, ah_itr);
+	if (!exec_params.ah) {
+		fprintf(stderr, "Failed to execute rdma_reset_device(), no AH found!\n");
+		return EINVAL;
+	}
+
 	DEBUG_LOG_FAST_PATH("Posting FLUSH MARKER on queue\n");
 	rdma_exec_task(&exec_params);
 
