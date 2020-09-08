@@ -1029,29 +1029,27 @@ int rdma_reset_device(struct rdma_device *device)
 	/* - - - - - - - FLUSH WORK COMPLETIONS - - - - - - - */
 	struct rdma_exec_params exec_params;
 	memset(&exec_params, 0, sizeof exec_params);
-	exec_params.wr_id = WR_ID_FLUSH_MARKER;
-	exec_params.device = device;
-	if (!kh_size(&device->ah_hash)) {
-		fprintf(stderr, "Failed to execute rdma_reset_device(), no AH found!\n");
-		return EINVAL;
+	if (kh_size(&device->ah_hash)) {
+		exec_params.wr_id = WR_ID_FLUSH_MARKER;
+		exec_params.device = device;
+		khint_t	ah_itr = kh_begin(&device->ah_hash);
+		exec_params.ah = kh_value(&device->ah_hash, ah_itr);
+
+		DEBUG_LOG_FAST_PATH("Posting FLUSH MARKER on queue\n");
+		rdma_exec_task(&exec_params);
+
+		DEBUG_LOG_FAST_PATH("Flushing Work Completions\n");
+		struct rdma_completion_event rdma_comp_ev[COMP_ARRAY_SIZE];
+		int flushed = 0;
+		do {
+			int i, reported_ev = 0;
+			reported_ev = rdma_poll_completions(device, &rdma_comp_ev[reported_ev], COMP_ARRAY_SIZE);
+			for (i = 0; !flushed && i < reported_ev; i++) {
+				flushed = rdma_comp_ev[i].wr_id == WR_ID_FLUSH_MARKER;
+			}
+		} while (!flushed);
+		DEBUG_LOG_FAST_PATH("Finished Work Completions flushing\n");
 	}
-	khint_t	ah_itr = kh_begin(&device->ah_hash);
-	exec_params.ah = kh_value(&device->ah_hash, ah_itr);
-
-	DEBUG_LOG_FAST_PATH("Posting FLUSH MARKER on queue\n");
-	rdma_exec_task(&exec_params);
-
-	DEBUG_LOG_FAST_PATH("Flushing Work Completions\n");
-	struct rdma_completion_event rdma_comp_ev[COMP_ARRAY_SIZE];
-	int flushed = 0;
-	do {
-		int i, reported_ev = 0;
-		reported_ev = rdma_poll_completions(device, &rdma_comp_ev[reported_ev], COMP_ARRAY_SIZE);
-		for (i = 0; !flushed && i < reported_ev; i++) {
-			flushed = rdma_comp_ev[i].wr_id == WR_ID_FLUSH_MARKER;
-		}
-	} while (!flushed);
-	DEBUG_LOG_FAST_PATH("Finished Work Completions flushing\n");
 
 	/* - - - - - - - RESET RDMA_DEVICE MEMBERS - - - - - - - */
 	memset(device->app_wr_id, 0, sizeof(device->app_wr_id));
