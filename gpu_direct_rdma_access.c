@@ -1034,6 +1034,10 @@ int rdma_reset_device(struct rdma_device *device)
 		exec_params.device = device;
 		khint_t	ah_itr = kh_begin(&device->ah_hash);
 		exec_params.ah = kh_value(&device->ah_hash, ah_itr);
+		if (exec_params.ah == NULL) {
+			fprintf(stderr, "Failed to execute rdma_reset_device(), no AH found!\n");
+			return EINVAL;
+		}
 
 		DEBUG_LOG_FAST_PATH("Posting FLUSH MARKER on queue\n");
 		rdma_exec_task(&exec_params);
@@ -1055,8 +1059,6 @@ int rdma_reset_device(struct rdma_device *device)
 	memset(device->app_wr_id, 0, sizeof(device->app_wr_id));
 	device->app_wr_id_idx = 0;
 	device->qp_available_wr = SEND_Q_DEPTH;
-	kh_foreach_value(&device->ah_hash, exec_params.ah, ibv_destroy_ah(exec_params.ah));
-	kh_clear(kh_ib_ah, &device->ah_hash);
 	/* - - - - - - - Modify QP to RESET - - - - - - - */
 	qp_attr.qp_state = IBV_QPS_RESET;
 	attr_mask = IBV_QP_STATE;
