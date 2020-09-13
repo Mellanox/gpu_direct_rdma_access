@@ -1029,15 +1029,15 @@ int rdma_reset_device(struct rdma_device *device)
 	/* - - - - - - - FLUSH WORK COMPLETIONS - - - - - - - */
 	struct rdma_exec_params exec_params;
 	memset(&exec_params, 0, sizeof exec_params);
-	if (kh_size(&device->ah_hash)) {
+	khiter_t ah_itr = 0;
+	for (ah_itr = kh_begin(&device->ah_hash); ah_itr != kh_end(&device->ah_hash); ++ah_itr) {
+		if (kh_exist(&device->ah_hash, ah_itr) && kh_value(&device->ah_hash, ah_itr) != NULL) {
+			exec_params.ah = kh_value(&device->ah_hash, ah_itr);
+		}
+	}
+	if (exec_params.ah) {
 		exec_params.wr_id = WR_ID_FLUSH_MARKER;
 		exec_params.device = device;
-		khint_t	ah_itr = kh_begin(&device->ah_hash);
-		exec_params.ah = kh_value(&device->ah_hash, ah_itr);
-		if (exec_params.ah == NULL) {
-			fprintf(stderr, "Failed to execute rdma_reset_device(), no AH found!\n");
-			return EINVAL;
-		}
 
 		DEBUG_LOG_FAST_PATH("Posting FLUSH MARKER on queue\n");
 		rdma_exec_task(&exec_params);
