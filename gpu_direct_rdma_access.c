@@ -1009,7 +1009,7 @@ int rdma_exec_task(struct rdma_exec_params *exec_params)
 int rdma_reset_device(struct rdma_device *device)
 {
 	if (!is_server(device)) {
-		fprintf(stderr, "Method \"rdma_reset_server_device()\" could be executed only by server side!\n");
+		fprintf(stderr, "Method \"rdma_reset_device()\" could be executed only by server side!\n");
 		return EOPNOTSUPP;
 	}
 	struct ibv_qp_attr      qp_attr;
@@ -1027,33 +1027,38 @@ int rdma_reset_device(struct rdma_device *device)
 	}
 	
 	/* - - - - - - - FLUSH WORK COMPLETIONS - - - - - - - */
-	struct rdma_exec_params exec_params = {};
-	exec_params.wr_id = WR_ID_FLUSH_MARKER;
-	exec_params.device = device;
-	khint_t	ah_itr = kh_begin(&device->ah_hash);
-	exec_params.ah = kh_value(&device->ah_hash, ah_itr);
-	DEBUG_LOG_FAST_PATH("Posting FLUSH MARKER on queue\n");
-	rdma_exec_task(&exec_params);
-
-	DEBUG_LOG_FAST_PATH("Flushing Work Completions\n");
-	struct rdma_completion_event rdma_comp_ev[COMP_ARRAY_SIZE];
-	int flushed = 0;
-	do {
-		int i, reported_ev = 0;
-		reported_ev = rdma_poll_completions(device, &rdma_comp_ev[reported_ev], COMP_ARRAY_SIZE);
-		for (i = 0; !flushed && i < reported_ev; i++) {
-			flushed = rdma_comp_ev[i].wr_id == WR_ID_FLUSH_MARKER;
+	struct rdma_exec_params exec_params;
+	memset(&exec_params, 0, sizeof exec_params);
+	khiter_t ah_itr = 0;
+	for (ah_itr = kh_begin(&device->ah_hash); ah_itr != kh_end(&device->ah_hash); ++ah_itr) {
+		if (kh_exist(&device->ah_hash, ah_itr) && kh_value(&device->ah_hash, ah_itr) != NULL) {
+			exec_params.ah = kh_value(&device->ah_hash, ah_itr);
 		}
-	} while (!flushed);
-	DEBUG_LOG_FAST_PATH("Finished Work Completions flushing\n");
+	}
+	if (exec_params.ah) {
+		exec_params.wr_id = WR_ID_FLUSH_MARKER;
+		exec_params.device = device;
+
+		DEBUG_LOG_FAST_PATH("Posting FLUSH MARKER on queue\n");
+		rdma_exec_task(&exec_params);
+
+		DEBUG_LOG_FAST_PATH("Flushing Work Completions\n");
+		struct rdma_completion_event rdma_comp_ev[COMP_ARRAY_SIZE];
+		int flushed = 0;
+		do {
+			int i, reported_ev = 0;
+			reported_ev = rdma_poll_completions(device, &rdma_comp_ev[reported_ev], COMP_ARRAY_SIZE);
+			for (i = 0; !flushed && i < reported_ev; i++) {
+				flushed = rdma_comp_ev[i].wr_id == WR_ID_FLUSH_MARKER;
+			}
+		} while (!flushed);
+		DEBUG_LOG_FAST_PATH("Finished Work Completions flushing\n");
+	}
 
 	/* - - - - - - - RESET RDMA_DEVICE MEMBERS - - - - - - - */
 	memset(device->app_wr_id, 0, sizeof(device->app_wr_id));
 	device->app_wr_id_idx = 0;
 	device->qp_available_wr = SEND_Q_DEPTH;
-	kh_foreach_value(&device->ah_hash, exec_params.ah, ibv_destroy_ah(exec_params.ah));
-	kh_clear(kh_ib_ah, &device->ah_hash);
-
 	/* - - - - - - - Modify QP to RESET - - - - - - - */
 	qp_attr.qp_state = IBV_QPS_RESET;
 	attr_mask = IBV_QP_STATE;
@@ -1408,7 +1413,6 @@ int rdma_submit_task(struct rdma_task_attr *attr)
     if (rdma_create_ah_cached(exec_params.device, &ah_attr, &exec_params.ah)) {
         return 1;
     }
-
     ret_val = rdma_exec_task(&exec_params);
 
     return ret_val;
