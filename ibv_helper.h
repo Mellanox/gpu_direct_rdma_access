@@ -36,11 +36,6 @@
 #include <sys/types.h>
 #include <dirent.h>
 
-enum ibv_gid_type {
-        IBV_GID_TYPE_IB_ROCE_V1,
-        IBV_GID_TYPE_ROCE_V2,
-};
-
 static int ibv_read_sysfs_file(const char *dir, const char *file,
                         char *buf, size_t size)
 {
@@ -107,7 +102,7 @@ static int ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
 			/* In IB, this file doesn't exist and the kernel sets
 			 * errno to -EINVAL.
 			 */
-			*type = IBV_GID_TYPE_IB_ROCE_V1;
+			*type = IBV_GID_TYPE_ROCE_V1;
 			return 0;
 		}
 		if (asprintf(&dir_path, "%s/%s/%d/%s/",
@@ -122,7 +117,7 @@ static int ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
 				 * we have an old kernel and all GIDs are
 				 * IB/RoCE v1
 				 */
-				*type = IBV_GID_TYPE_IB_ROCE_V1;
+				*type = IBV_GID_TYPE_ROCE_V1;
 			else
 				return -1;
 		} else {
@@ -132,7 +127,7 @@ static int ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
 		}
 	} else {
                 if (!strcmp(buff, V1_TYPE)) {
-                        *type = IBV_GID_TYPE_IB_ROCE_V1;
+                        *type = IBV_GID_TYPE_ROCE_V1;
                 } else if (!strcmp(buff, V2_TYPE)) {
                         *type = IBV_GID_TYPE_ROCE_V2;
                 } else {
